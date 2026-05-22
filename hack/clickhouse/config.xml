@@ -1,0 +1,12 @@
+<clickhouse>
+    <!-- Allow BACKUP/RESTORE commands -->
+    <allow_experimental_database_backup>1</allow_experimental_database_backup>
+
+    <!-- S3 storage configuration for backups -->
+    <s3>
+        <use_environment_credentials>false</use_environment_credentials>
+    </s3>
+
+    <!-- Allow connections from any host -->
+    <listen_host>0.0.0.0</listen_host>
+</clickhouse>
