@@ -75,7 +75,7 @@ async fn get_backup_status(
 ) -> Result<BackupStatus, ClickVaultError> {
     let status = client
         .query(
-            "SELECT id, status, toString(start_time) as start_time, \
+            "SELECT id, toString(status) as status, toString(start_time) as start_time, \
              toString(end_time) as end_time, total_size, \
              ifNull(error, '') as error \
              FROM system.backups WHERE id = ?",
@@ -94,7 +94,7 @@ pub async fn get_recent_backups(
 ) -> Result<Vec<BackupStatus>, ClickVaultError> {
     let statuses = client
         .query(
-            "SELECT id, status, toString(start_time) as start_time, \
+            "SELECT id, toString(status) as status, toString(start_time) as start_time, \
              toString(end_time) as end_time, total_size, \
              ifNull(error, '') as error \
              FROM system.backups \

@@ -31,12 +31,24 @@ fn default_user() -> Option<String> {
 #[derive(Debug, Deserialize)]
 pub struct S3Config {
     pub endpoint: String,
+    /// S3 endpoint as seen by ClickHouse (e.g., Docker-internal URL).
+    /// Falls back to `endpoint` if not set.
+    pub clickhouse_endpoint: Option<String>,
     pub bucket: String,
     #[serde(default)]
     pub prefix: String,
     pub region: String,
     pub access_key: Option<String>,
     pub secret_key: Option<String>,
+    #[serde(default)]
+    pub path_style: bool,
+}
+
+impl S3Config {
+    /// Returns the endpoint that ClickHouse should use in BACKUP/RESTORE SQL.
+    pub fn clickhouse_endpoint(&self) -> &str {
+        self.clickhouse_endpoint.as_deref().unwrap_or(&self.endpoint)
+    }
 }
 
 #[derive(Debug, Deserialize)]

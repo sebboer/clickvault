@@ -25,9 +25,11 @@ pub async fn run_backup(
     bucket: &Bucket,
     config: &Config,
     force_full: bool,
+    skip_in_progress_check: bool,
 ) -> Result<BackupResult, ClickVaultError> {
-    // Check if a backup is already running
-    check_no_backup_in_progress(client).await?;
+    if !skip_in_progress_check {
+        check_no_backup_in_progress(client).await?;
+    }
 
     let prefix = &config.s3.prefix;
 
@@ -119,7 +121,7 @@ pub async fn run_backup(
 async fn check_no_backup_in_progress(client: &Client) -> Result<(), ClickVaultError> {
     let in_progress: Vec<progress::BackupStatus> = client
         .query(
-            "SELECT id, status, toString(start_time) as start_time, \
+            "SELECT id, toString(status) as status, toString(start_time) as start_time, \
              toString(end_time) as end_time, total_size, \
              ifNull(error, '') as error \
              FROM system.backups WHERE status = 'CREATING_BACKUP'",

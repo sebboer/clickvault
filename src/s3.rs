@@ -23,8 +23,12 @@ pub fn build_bucket(config: &S3Config) -> Result<Box<Bucket>, ClickVaultError> {
     )
     .map_err(|e| ClickVaultError::Config(format!("Invalid S3 credentials: {e}")))?;
 
-    let bucket = Bucket::new(&config.bucket, region, credentials)
+    let mut bucket = Bucket::new(&config.bucket, region, credentials)
         .map_err(|e| ClickVaultError::Config(format!("Failed to create S3 bucket handle: {e}")))?;
+
+    if config.path_style {
+        bucket = bucket.with_path_style();
+    }
 
     Ok(bucket)
 }
@@ -50,7 +54,7 @@ pub fn incremental_backup_path(prefix: &str, timestamp: &DateTime<Utc>) -> Strin
 /// Builds the S3() SQL fragment for use in ClickHouse BACKUP/RESTORE commands.
 /// Returns: S3('https://endpoint/bucket/path', 'access_key', 'secret_key')
 pub fn s3_sql_fragment(config: &S3Config, path: &str) -> String {
-    let url = format!("{}/{}/{}", config.endpoint, config.bucket, path);
+    let url = format!("{}/{}/{}", config.clickhouse_endpoint(), config.bucket, path);
     let access_key = config.access_key.as_deref().unwrap_or("");
     let secret_key = config.secret_key.as_deref().unwrap_or("");
     format!("S3('{url}', '{access_key}', '{secret_key}')")

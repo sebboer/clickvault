@@ -156,6 +156,7 @@ fn find_chain_for_incremental(
 
 /// Finds the latest backup across all chains (could be full or incremental).
 /// This is the backup that a new incremental should chain off of.
+#[allow(dead_code)]
 pub async fn latest_backup(
     bucket: &Bucket,
     prefix: &str,

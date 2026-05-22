@@ -39,14 +39,14 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_default();
 
     match cli.command {
-        Command::Backup { full } => {
+        Command::Backup { full, force } => {
             let kind = if full {
                 BackupKind::Full
             } else {
                 BackupKind::Incremental
             };
 
-            match backup::executor::run_backup(&ch_client, &bucket, &config, full).await {
+            match backup::executor::run_backup(&ch_client, &bucket, &config, full, force).await {
                 Ok(result) => {
                     info!(
                         kind = %result.metadata.kind,

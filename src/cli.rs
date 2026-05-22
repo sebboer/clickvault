@@ -6,11 +6,11 @@ use clap::{Parser, Subcommand};
 #[command(name = "clickvault", about = "ClickHouse backup manager for S3")]
 pub struct Cli {
     /// Path to the TOML configuration file
-    #[arg(short, long, default_value = "/etc/clickvault/config.toml")]
+    #[arg(short, long, global = true, default_value = "/etc/clickvault/config.toml")]
     pub config: PathBuf,
 
     /// Log level (trace, debug, info, warn, error)
-    #[arg(short, long, default_value = "info")]
+    #[arg(short, long, global = true, default_value = "info")]
     pub log_level: String,
 
     #[command(subcommand)]
@@ -24,6 +24,9 @@ pub enum Command {
         /// Force a full backup regardless of schedule
         #[arg(long)]
         full: bool,
+        /// Skip the in-progress backup check (use when a previous backup is stuck)
+        #[arg(long)]
+        force: bool,
     },
 
     /// List known backups in S3
