@@ -1,10 +1,19 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
+  "minimumReleaseAge": "3 days",
   "packageRules": [
     {
       "matchManagers": ["cargo"],
       "groupName": "rust dependencies"
+    },
+    {
+      "matchManagers": ["dockerfile"],
+      "groupName": "docker base images"
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "groupName": "github actions"
     }
   ]
 }
