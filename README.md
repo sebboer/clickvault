@@ -29,6 +29,14 @@ ClickVault automates full and incremental backups with deep chaining, progress m
 cargo install clickvault --version 0.1.0-alpha.1
 ```
 
+### Docker
+
+```bash
+docker pull ghcr.io/sebboer/clickvault:latest
+```
+
+Multi-arch image available for `linux/amd64` and `linux/arm64`.
+
 ### From source
 
 ```bash
@@ -237,6 +245,48 @@ Cleanup operates on entire chains. With `keep_full_backups = 4`, the 4 most rece
 
 # Cleanup once daily at 03:00
 0 3 * * * /usr/local/bin/clickvault cleanup --config /etc/clickvault/config.toml
+```
+
+### Docker Usage
+
+Mount your config file and run any command:
+
+```bash
+# Run a full backup
+docker run --rm \
+  -v /path/to/config.toml:/etc/clickvault/config.toml:ro \
+  ghcr.io/sebboer/clickvault:latest \
+  backup --full
+
+# Run an incremental backup
+docker run --rm \
+  -v /path/to/config.toml:/etc/clickvault/config.toml:ro \
+  ghcr.io/sebboer/clickvault:latest \
+  backup
+
+# List backups
+docker run --rm \
+  -v /path/to/config.toml:/etc/clickvault/config.toml:ro \
+  ghcr.io/sebboer/clickvault:latest \
+  list
+
+# Cleanup with dry run
+docker run --rm \
+  -v /path/to/config.toml:/etc/clickvault/config.toml:ro \
+  ghcr.io/sebboer/clickvault:latest \
+  cleanup --dry-run
+```
+
+Credentials can be passed via environment variables instead of the config file:
+
+```bash
+docker run --rm \
+  -e CLICKVAULT_CLICKHOUSE_PASSWORD=secret \
+  -e CLICKVAULT_S3_ACCESS_KEY=AKIA... \
+  -e CLICKVAULT_S3_SECRET_KEY=... \
+  -v /path/to/config.toml:/etc/clickvault/config.toml:ro \
+  ghcr.io/sebboer/clickvault:latest \
+  backup
 ```
 
 ## Architecture
