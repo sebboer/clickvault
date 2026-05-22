@@ -74,7 +74,7 @@ pub async fn write_metadata(
     bucket
         .put_object(&path, json.as_bytes())
         .await
-        .map_err(|e| ClickVaultError::S3(e))?;
+        .map_err(ClickVaultError::S3)?;
     Ok(())
 }
 
@@ -86,7 +86,7 @@ pub async fn read_metadata(
     let response = bucket
         .get_object(&path)
         .await
-        .map_err(|e| ClickVaultError::S3(e))?;
+        .map_err(ClickVaultError::S3)?;
     let meta: BackupMetadata = serde_json::from_slice(response.as_slice())?;
     Ok(meta)
 }
@@ -104,7 +104,7 @@ pub async fn list_prefixes(
         let results = bucket
             .list(prefix.to_string(), Some("/".to_string()))
             .await
-            .map_err(|e| ClickVaultError::S3(e))?;
+            .map_err(ClickVaultError::S3)?;
 
         for result in &results {
             if let Some(cps) = &result.common_prefixes {
@@ -132,14 +132,14 @@ pub async fn delete_prefix(bucket: &Bucket, prefix: &str) -> Result<u64, ClickVa
     let results = bucket
         .list(prefix.to_string(), None)
         .await
-        .map_err(|e| ClickVaultError::S3(e))?;
+        .map_err(ClickVaultError::S3)?;
 
     for result in &results {
         for object in &result.contents {
             bucket
                 .delete_object(&object.key)
                 .await
-                .map_err(|e| ClickVaultError::S3(e))?;
+                .map_err(ClickVaultError::S3)?;
             deleted += 1;
         }
     }

@@ -97,7 +97,7 @@ pub async fn discover_chains(
     }
 
     // Sort chains newest-first
-    chains.sort_by(|a, b| b.full.timestamp.cmp(&a.full.timestamp));
+    chains.sort_by_key(|c| std::cmp::Reverse(c.full.timestamp));
 
     Ok(chains)
 }
@@ -126,12 +126,11 @@ fn find_chain_for_incremental(
     // We need to trace the chain of incrementals back to a full.
     // For safety, limit the depth to avoid infinite loops.
     for _ in 0..100 {
-        // Look for the base among all chains' incrementals
+        let mut found = false;
+
         for chain in chains {
             for (path, meta) in &chain.incrementals {
                 if path.trim_end_matches('/') == current_base.trim_end_matches('/') {
-                    // Found the base — it belongs to this chain's full backup.
-                    // But we need to trace further if this incremental also has a base.
                     if let Some(next_base) = &meta.base_backup_path {
                         // Check if next_base is the full backup
                         if chain.full_path.trim_end_matches('/')
@@ -140,6 +139,7 @@ fn find_chain_for_incremental(
                             return Some(chain.full_path.clone());
                         }
                         current_base = next_base;
+                        found = true;
                     } else {
                         return Some(chain.full_path.clone());
                     }
@@ -147,8 +147,9 @@ fn find_chain_for_incremental(
             }
         }
 
-        // If we couldn't find the base at all, it's orphaned
-        break;
+        if !found {
+            break;
+        }
     }
 
     None
