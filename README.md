@@ -19,7 +19,7 @@ ClickVault automates full and incremental backups with deep chaining, progress m
 
 - Rust 1.85+ (edition 2024)
 - ClickHouse server with `BACKUP`/`RESTORE` support (v22.8+)
-- S3-compatible storage (AWS S3, MinIO, etc.)
+- S3-compatible storage (AWS S3, RustFS, etc.)
 
 ## Installation
 

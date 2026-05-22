@@ -81,7 +81,7 @@ notify/* -> config.rs (provider config)
 
 No test suite exists yet. To test manually, you need:
 - A running ClickHouse instance with a database
-- S3-compatible storage (MinIO works for local testing)
+- S3-compatible storage (RustFS works for local testing)
 - A `config.toml` pointing to both
 
 ## Areas Not Yet Implemented
