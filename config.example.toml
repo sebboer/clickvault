@@ -1,0 +1,37 @@
+[clickhouse]
+url = "http://localhost:8123"
+# user = "default"              # or set CLICKVAULT_CLICKHOUSE_USER
+# password = ""                 # or set CLICKVAULT_CLICKHOUSE_PASSWORD
+database = "mydb"
+
+[s3]
+endpoint = "https://s3.amazonaws.com"
+bucket = "my-backup-bucket"
+prefix = "clickhouse-backups"
+region = "eu-central-1"
+# access_key = "AKIA..."       # or set CLICKVAULT_S3_ACCESS_KEY
+# secret_key = "..."           # or set CLICKVAULT_S3_SECRET_KEY
+
+[schedule]
+# Create a full backup every 7 days; incremental backups in between.
+full_backup_interval_days = 7
+
+[retention]
+# Keep the last 4 full backup chains (each chain = 1 full + its incrementals).
+keep_full_backups = 4
+
+[notifications]
+on_success = true
+on_failure = true
+
+# Slack webhook notification
+# [[notifications.providers]]
+# type = "slack"
+# webhook_url = "https://hooks.slack.com/services/T.../B.../xxx"
+
+# Generic HTTP webhook notification
+# [[notifications.providers]]
+# type = "webhook"
+# url = "https://monitoring.example.com/api/alerts"
+# method = "POST"
+# headers = { Authorization = "Bearer token123" }
