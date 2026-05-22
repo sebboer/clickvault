@@ -1,7 +1,15 @@
 [package]
 name = "clickvault"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
+description = "ClickHouse backup manager for S3 with full and incremental backups"
+license = "MIT"
+repository = "https://github.com/sebboer/clickvault"
+homepage = "https://github.com/sebboer/clickvault"
+readme = "README.md"
+keywords = ["clickhouse", "backup", "s3", "incremental", "database"]
+categories = ["command-line-utilities", "database"]
+exclude = ["hack/", ".claude/"]
 
 [dependencies]
 anyhow = "1.0"
