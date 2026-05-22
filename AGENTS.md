@@ -1,8 +1,18 @@
-# CLAUDE.md
+# AGENTS.md
 
 ## Project Overview
 
 ClickVault is a Rust CLI tool that manages ClickHouse database backups to S3 using native ClickHouse `BACKUP` SQL commands. It is cron-driven (no daemon mode) and designed for low RPO with deep incremental chaining.
+
+## Publishing
+
+The crate is published to [crates.io](https://crates.io/crates/clickvault) as an alpha release.
+
+- **Current version**: `0.1.0-alpha.1`
+- **Versioning**: semver with pre-release tags (`alpha.N` -> `beta.N` -> stable)
+- **Publish**: `cargo publish` (requires `cargo login` with a crates.io API token)
+- **Dry-run**: `cargo publish --dry-run` to validate before publishing
+- **Excluded from package**: `hack/`, `.claude/` (via `exclude` in Cargo.toml)
 
 ## Build & Run
 

@@ -23,6 +23,14 @@ ClickVault automates full and incremental backups with deep chaining, progress m
 
 ## Installation
 
+### From crates.io
+
+```bash
+cargo install clickvault --version 0.1.0-alpha.1
+```
+
+### From source
+
 ```bash
 git clone https://github.com/sebboer/clickvault.git
 cd clickvault
