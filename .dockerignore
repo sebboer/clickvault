@@ -1,0 +1,8 @@
+target/
+hack/
+.claude/
+.git/
+*.md
+LICENSE
+renovate.json
+config.toml
