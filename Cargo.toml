@@ -17,7 +17,7 @@ async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.6.1", features = ["derive"] }
 clickhouse = "0.15.0"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 rust-s3 = { version = "0.37.2", default-features = false, features = ["tokio-rustls-tls", "fail-on-err", "tags"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
