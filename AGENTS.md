@@ -114,5 +114,4 @@ For end-to-end testing against a real stack, use `hack/docker-compose.yml`
 
 - Restore subcommand (out of scope for v1)
 - Integration tests against a live ClickHouse + S3 stack (only unit tests exist)
-- S3 batch delete (currently deletes objects one by one)
 - Backup of multiple databases or individual tables (currently single database only)

@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use s3::creds::Credentials;
 use s3::error::S3Error;
+use s3::serde_types::{DeleteObjectsResult, ObjectIdentifier};
 use s3::{Bucket, Region};
 use tracing::warn;
 
@@ -135,30 +136,20 @@ pub async fn read_metadata(
 
 /// Lists "directories" under a given prefix by using S3 list with a delimiter.
 /// Returns the common prefixes (directory-like entries).
+///
+/// `Bucket::list` paginates internally and returns every result page, so no
+/// continuation-token handling is needed here.
 pub async fn list_prefixes(bucket: &Bucket, prefix: &str) -> Result<Vec<String>, ClickVaultError> {
-    let mut prefixes = Vec::new();
-    let mut continuation_token = None;
+    let results = bucket
+        .list(prefix.to_string(), Some("/".to_string()))
+        .await
+        .map_err(ClickVaultError::S3)?;
 
-    loop {
-        let results = bucket
-            .list(prefix.to_string(), Some("/".to_string()))
-            .await
-            .map_err(ClickVaultError::S3)?;
-
-        for result in &results {
-            if let Some(cps) = &result.common_prefixes {
-                for cp in cps {
-                    prefixes.push(cp.prefix.clone());
-                }
-            }
-
-            continuation_token = result.next_continuation_token.clone();
-        }
-
-        if continuation_token.is_none() {
-            break;
-        }
-    }
+    let mut prefixes: Vec<String> = results
+        .iter()
+        .flat_map(|result| result.common_prefixes.iter().flatten())
+        .map(|cp| cp.prefix.clone())
+        .collect();
 
     prefixes.sort();
     Ok(prefixes)
@@ -186,14 +177,39 @@ fn split_sidecar_last(keys: Vec<String>, sidecar: &str) -> (Vec<String>, Vec<Str
     keys.into_iter().partition(|key| key != sidecar)
 }
 
+/// Folds a batch-delete response into the outcome. Every submitted key
+/// without an error entry counts as deleted: S3 reports nonexistent keys as
+/// deleted, and some implementations omit `Deleted` entries entirely
+/// (quiet-mode responses), so `result.deleted` is not trusted for counting.
+fn apply_batch_result(outcome: &mut DeleteOutcome, submitted: u64, result: &DeleteObjectsResult) {
+    for err in &result.errors {
+        warn!(key = %err.key, code = %err.code, message = %err.message, "Failed to delete object");
+    }
+    outcome.failed += result.errors.len() as u64;
+    outcome.deleted += submitted - result.errors.len() as u64;
+}
+
+/// Deletes keys via the batch DeleteObjects API (rust-s3 chunks into
+/// requests of up to 1000 keys), continuing past per-key failures.
 async fn delete_keys(bucket: &Bucket, keys: &[String], outcome: &mut DeleteOutcome) {
-    for key in keys {
-        match bucket.delete_object(key).await {
-            Ok(_) => outcome.deleted += 1,
-            Err(e) => {
-                warn!(key = %key, error = %e, "Failed to delete object");
-                outcome.failed += 1;
-            }
+    if keys.is_empty() {
+        return;
+    }
+
+    let submitted = keys.len() as u64;
+    let ids: Vec<ObjectIdentifier> = keys
+        .iter()
+        .map(|key| ObjectIdentifier::new(key.as_str()))
+        .collect();
+
+    match bucket.delete_objects(ids).await {
+        Ok(result) => apply_batch_result(outcome, submitted, &result),
+        Err(e) => {
+            // Whole-request failure: per-key state is unknown. Deletes are
+            // idempotent and the sidecar stays in place, so the next cleanup
+            // run simply retries.
+            warn!(error = %e, keys = submitted, "Batch delete request failed");
+            outcome.failed += submitted;
         }
     }
 }
@@ -354,6 +370,48 @@ mod tests {
             vec![format!("{prefix}data/part1"), format!("{prefix}data/part2")]
         );
         assert_eq!(sidecars, vec![sidecar]);
+    }
+
+    #[test]
+    fn apply_batch_result_counts_non_errored_keys_as_deleted() {
+        use s3::serde_types::DeleteError;
+
+        // 5 keys submitted, 2 came back as errors; the response's Deleted
+        // list is deliberately empty (quiet-mode shape) and must not matter.
+        let result = DeleteObjectsResult {
+            deleted: vec![],
+            errors: vec![
+                DeleteError {
+                    key: "p/a".into(),
+                    code: "InternalError".into(),
+                    message: "boom".into(),
+                    version_id: None,
+                },
+                DeleteError {
+                    key: "p/b".into(),
+                    code: "AccessDenied".into(),
+                    message: "no".into(),
+                    version_id: None,
+                },
+            ],
+        };
+
+        let mut outcome = DeleteOutcome::default();
+        apply_batch_result(&mut outcome, 5, &result);
+        assert_eq!(outcome.deleted, 3);
+        assert_eq!(outcome.failed, 2);
+        assert!(!outcome.is_complete());
+
+        // Clean response: everything counts as deleted.
+        let clean = DeleteObjectsResult {
+            deleted: vec![],
+            errors: vec![],
+        };
+        let mut outcome = DeleteOutcome::default();
+        apply_batch_result(&mut outcome, 4, &clean);
+        assert_eq!(outcome.deleted, 4);
+        assert_eq!(outcome.failed, 0);
+        assert!(outcome.is_complete());
     }
 
     #[test]

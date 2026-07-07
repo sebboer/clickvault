@@ -33,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Cleanup deletes S3 objects via the batch `DeleteObjects` API (up to 1000
+  keys per request) instead of one request per object, with per-key errors
+  from the batch response feeding the existing partial-failure accounting.
+- Removed the misleading manual pagination loop in `list_prefixes`; rust-s3's
+  `list()` already returns all result pages.
 - CI no longer runs a release build; release-mode compilation stays covered by
   the release workflow at tag time, keeping PR feedback fast.
 
