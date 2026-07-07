@@ -65,6 +65,39 @@ async fn main() -> anyhow::Result<()> {
                         );
                         notify::dispatch(notif_config, &notifiers, &event).await;
                     }
+
+                    // Enforce retention in the same run when enabled. The
+                    // backup itself succeeded, so cleanup problems are logged
+                    // but never fail this run.
+                    if config.retention.auto_cleanup {
+                        match cleanup::cleanup(&bucket, &config, false).await {
+                            Ok(report) => {
+                                println!(
+                                    "Auto-cleanup: deleted {} chain(s), {} object(s)",
+                                    report.chains_deleted, report.objects_deleted
+                                );
+
+                                if report.has_failures() {
+                                    error!(
+                                        chains_failed = report.chains_failed,
+                                        objects_failed = report.objects_failed,
+                                        "Auto-cleanup could not fully delete some chains; will retry on the next run"
+                                    );
+                                }
+
+                                if let Some(notif_config) = &config.notifications {
+                                    let event = BackupEvent::CleanupCompleted {
+                                        chains_deleted: report.chains_deleted,
+                                        objects_deleted: report.objects_deleted,
+                                    };
+                                    notify::dispatch(notif_config, &notifiers, &event).await;
+                                }
+                            }
+                            Err(e) => {
+                                error!(error = %e, "Auto-cleanup failed (the backup itself succeeded)");
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     // ClickHouse errors can echo the BACKUP statement with

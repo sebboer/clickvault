@@ -128,9 +128,10 @@ ClickVault uses a TOML configuration file. See [config.example.toml](config.exam
 
 #### `[retention]`
 
-| Key                 | Required | Description                                          |
-| ------------------- | -------- | ---------------------------------------------------- |
-| `keep_full_backups` | yes      | Number of full backup chains to retain (minimum `1`) |
+| Key                 | Required | Description                                                            |
+| ------------------- | -------- | ---------------------------------------------------------------------- |
+| `keep_full_backups` | yes      | Number of full backup chains to retain (minimum `1`)                   |
+| `auto_cleanup`      | no       | Run cleanup after each successful backup (default: `false`)            |
 
 #### `[notifications]`
 
@@ -275,6 +276,8 @@ Cleanup operates on entire chains. With `keep_full_backups = 4`, the 4 most rece
 # Alert when backups silently stop (pair with healthchecks.io, Nagios, etc.)
 */30 * * * * /usr/local/bin/clickvault check --max-age 26h --config /etc/clickvault/config.toml || notify-oncall
 ```
+
+Retention is only enforced when `cleanup` runs — without the cleanup cron entry, backups grow unbounded. Alternatively, set `auto_cleanup = true` under `[retention]` to run cleanup after each successful backup and skip the separate cron entry (auto-cleanup problems are logged but never fail the backup run).
 
 ### Docker Usage
 

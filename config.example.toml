@@ -24,6 +24,8 @@ full_backup_interval_days = 7
 [retention]
 # Keep the last 4 full backup chains (each chain = 1 full + its incrementals).
 keep_full_backups = 4
+# Run cleanup after each successful backup instead of a separate cron entry.
+# auto_cleanup = false
 
 [notifications]
 on_success = true

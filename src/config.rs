@@ -94,6 +94,10 @@ pub struct ScheduleConfig {
 #[derive(Debug, Deserialize)]
 pub struct RetentionConfig {
     pub keep_full_backups: u32,
+    /// Run cleanup automatically after each successful backup, so retention
+    /// is enforced without a separate cleanup cron entry.
+    #[serde(default)]
+    pub auto_cleanup: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -303,6 +307,19 @@ mod tests {
         let mut cfg = parse(VALID);
         cfg.retention.keep_full_backups = 0;
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn auto_cleanup_defaults_off_and_parses() {
+        let cfg = parse(VALID);
+        assert!(!cfg.retention.auto_cleanup);
+
+        let toml_str = VALID.replace(
+            "keep_full_backups = 4",
+            "keep_full_backups = 4\nauto_cleanup = true",
+        );
+        let cfg = parse(&toml_str);
+        assert!(cfg.retention.auto_cleanup);
     }
 
     #[test]
