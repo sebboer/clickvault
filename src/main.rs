@@ -66,7 +66,12 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 Err(e) => {
-                    error!(error = %e, "Backup failed");
+                    // ClickHouse errors can echo the BACKUP statement with
+                    // its inline S3 credentials, so the error text is
+                    // redacted before it reaches logs, stderr, or
+                    // notification payloads.
+                    let error_text = config.redact_secrets(&e.to_string());
+                    error!(error = %error_text, "Backup failed");
 
                     // Prefer the kind the run actually decided on (a scheduled
                     // run may auto-promote to full); fall back to the
@@ -80,13 +85,13 @@ async fn main() -> anyhow::Result<()> {
                     if let Some(notif_config) = &config.notifications {
                         let event = BackupEvent::backup_failed(
                             kind,
-                            e.to_string(),
+                            error_text.clone(),
                             config.clickhouse.database.clone(),
                         );
                         notify::dispatch(notif_config, &notifiers, &event).await;
                     }
 
-                    return Err(e.source.into());
+                    return Err(anyhow::anyhow!(error_text));
                 }
             }
         }

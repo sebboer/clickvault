@@ -129,6 +129,32 @@ impl Config {
         }
     }
 
+    /// Values that must never appear in logs, stderr, or notification
+    /// payloads. ClickHouse error messages can echo the BACKUP statement —
+    /// which carries inline S3 credentials — e.g. syntax errors quote the
+    /// query text around the failure position.
+    fn secrets(&self) -> impl Iterator<Item = &str> {
+        [
+            self.s3.access_key.as_deref(),
+            self.s3.secret_key.as_deref(),
+            self.clickhouse.password.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.is_empty())
+    }
+
+    /// Replaces every occurrence of a configured secret in `text` with `***`.
+    pub fn redact_secrets(&self, text: &str) -> String {
+        let mut out = text.to_string();
+        for secret in self.secrets() {
+            if out.contains(secret) {
+                out = out.replace(secret, "***");
+            }
+        }
+        out
+    }
+
     fn validate(&self) -> Result<(), ClickVaultError> {
         if self.clickhouse.url.is_empty() {
             return Err(ClickVaultError::Config(
@@ -234,6 +260,29 @@ mod tests {
         let mut cfg = parse(VALID);
         cfg.retention.keep_full_backups = 0;
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn redact_secrets_masks_all_configured_secrets() {
+        let mut cfg = parse(VALID);
+        cfg.s3.access_key = Some("AKIAKEY".into());
+        cfg.s3.secret_key = Some("supersecret".into());
+        cfg.clickhouse.password = Some("chpass".into());
+
+        let text = "S3('http://e/b/p/', 'AKIAKEY', 'supersecret') pw=chpass again: supersecret";
+        assert_eq!(
+            cfg.redact_secrets(text),
+            "S3('http://e/b/p/', '***', '***') pw=*** again: ***"
+        );
+    }
+
+    #[test]
+    fn redact_secrets_handles_missing_and_empty_secrets() {
+        let mut cfg = parse(VALID);
+        cfg.s3.secret_key = Some(String::new());
+
+        let text = "nothing to hide";
+        assert_eq!(cfg.redact_secrets(text), text);
     }
 
     #[test]
