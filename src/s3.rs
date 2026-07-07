@@ -64,7 +64,12 @@ fn escape_sql_str(s: &str) -> String {
 /// Builds the S3() SQL fragment for use in ClickHouse BACKUP/RESTORE commands.
 /// Returns: S3('https://endpoint/bucket/path', 'access_key', 'secret_key')
 pub fn s3_sql_fragment(config: &S3Config, path: &str) -> String {
-    let url = format!("{}/{}/{}", config.clickhouse_endpoint(), config.bucket, path);
+    let url = format!(
+        "{}/{}/{}",
+        config.clickhouse_endpoint(),
+        config.bucket,
+        path
+    );
     let access_key = config.access_key.as_deref().unwrap_or("");
     let secret_key = config.secret_key.as_deref().unwrap_or("");
     format!(
@@ -108,10 +113,7 @@ pub async fn read_metadata(
 
 /// Lists "directories" under a given prefix by using S3 list with a delimiter.
 /// Returns the common prefixes (directory-like entries).
-pub async fn list_prefixes(
-    bucket: &Bucket,
-    prefix: &str,
-) -> Result<Vec<String>, ClickVaultError> {
+pub async fn list_prefixes(bucket: &Bucket, prefix: &str) -> Result<Vec<String>, ClickVaultError> {
     let mut prefixes = Vec::new();
     let mut continuation_token = None;
 
@@ -160,4 +162,110 @@ pub async fn delete_prefix(bucket: &Bucket, prefix: &str) -> Result<u64, ClickVa
     }
 
     Ok(deleted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn s3_config() -> S3Config {
+        S3Config {
+            endpoint: "https://s3.example.com".into(),
+            clickhouse_endpoint: None,
+            bucket: "my-bucket".into(),
+            prefix: "backups".into(),
+            region: "eu-central-1".into(),
+            access_key: Some("AKIA".into()),
+            secret_key: Some("secret".into()),
+            path_style: false,
+        }
+    }
+
+    #[test]
+    fn full_backup_path_with_and_without_prefix() {
+        let ts = Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap();
+        assert_eq!(
+            full_backup_path("backups", &ts),
+            "backups/full/20260102T030405000Z/"
+        );
+        assert_eq!(full_backup_path("", &ts), "full/20260102T030405000Z/");
+    }
+
+    #[test]
+    fn incremental_backup_path_with_and_without_prefix() {
+        let ts = Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap();
+        assert_eq!(
+            incremental_backup_path("backups", &ts),
+            "backups/incremental/20260102T030405000Z/"
+        );
+        assert_eq!(
+            incremental_backup_path("", &ts),
+            "incremental/20260102T030405000Z/"
+        );
+    }
+
+    #[test]
+    fn paths_are_millisecond_unique_within_the_same_second() {
+        let a = Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap();
+        let b = a + chrono::Duration::milliseconds(123);
+        assert_ne!(full_backup_path("p", &a), full_backup_path("p", &b));
+        assert_eq!(full_backup_path("p", &b), "p/full/20260102T030405123Z/");
+    }
+
+    #[test]
+    fn metadata_path_appends_sidecar_filename() {
+        assert_eq!(
+            metadata_path("backups/full/20260102T030405000Z/"),
+            "backups/full/20260102T030405000Z/.clickvault_meta.json"
+        );
+    }
+
+    #[test]
+    fn escape_sql_str_escapes_quotes_and_backslashes() {
+        assert_eq!(escape_sql_str("plain"), "plain");
+        assert_eq!(escape_sql_str("O'Brien"), "O\\'Brien");
+        assert_eq!(escape_sql_str("a\\b"), "a\\\\b");
+        // Backslash is escaped before the quote so the result is unambiguous.
+        assert_eq!(escape_sql_str("\\'"), "\\\\\\'");
+    }
+
+    #[test]
+    fn s3_sql_fragment_builds_expected_call() {
+        let cfg = s3_config();
+        assert_eq!(
+            s3_sql_fragment(&cfg, "backups/full/x/"),
+            "S3('https://s3.example.com/my-bucket/backups/full/x/', 'AKIA', 'secret')"
+        );
+    }
+
+    #[test]
+    fn s3_sql_fragment_escapes_credentials() {
+        let mut cfg = s3_config();
+        cfg.secret_key = Some("se'cret".into());
+        let frag = s3_sql_fragment(&cfg, "p/");
+        assert!(frag.ends_with("'se\\'cret')"), "got: {frag}");
+    }
+
+    #[test]
+    fn s3_sql_fragment_uses_clickhouse_endpoint_override() {
+        let mut cfg = s3_config();
+        cfg.clickhouse_endpoint = Some("http://rustfs:9000".into());
+        let frag = s3_sql_fragment(&cfg, "p/");
+        assert!(
+            frag.contains("http://rustfs:9000/my-bucket/p/"),
+            "got: {frag}"
+        );
+    }
+
+    #[test]
+    fn s3_sql_fragment_handles_missing_credentials() {
+        let mut cfg = s3_config();
+        cfg.access_key = None;
+        cfg.secret_key = None;
+        assert_eq!(
+            s3_sql_fragment(&cfg, "p/"),
+            "S3('https://s3.example.com/my-bucket/p/', '', '')"
+        );
+    }
 }

@@ -6,7 +6,12 @@ use clap::{Parser, Subcommand};
 #[command(name = "clickvault", about = "ClickHouse backup manager for S3")]
 pub struct Cli {
     /// Path to the TOML configuration file
-    #[arg(short, long, global = true, default_value = "/etc/clickvault/config.toml")]
+    #[arg(
+        short,
+        long,
+        global = true,
+        default_value = "/etc/clickvault/config.toml"
+    )]
     pub config: PathBuf,
 
     /// Log level (trace, debug, info, warn, error)
