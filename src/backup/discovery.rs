@@ -1,6 +1,6 @@
 use chrono::{Duration, Utc};
 use s3::Bucket;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::{BackupChain, BackupMetadata};
 use crate::error::ClickVaultError;
@@ -24,7 +24,7 @@ pub async fn list_full_backups(
         match s3_helpers::read_metadata(bucket, &dir).await {
             Ok(meta) => backups.push((dir, meta)),
             Err(e) => {
-                debug!("Skipping backup at {dir}: {e}");
+                warn!("Skipping full backup at {dir} (unreadable metadata, possible orphan): {e}");
             }
         }
     }
@@ -51,7 +51,7 @@ pub async fn list_incremental_backups(
         match s3_helpers::read_metadata(bucket, &dir).await {
             Ok(meta) => backups.push((dir, meta)),
             Err(e) => {
-                debug!("Skipping incremental at {dir}: {e}");
+                warn!("Skipping incremental at {dir} (unreadable metadata, possible orphan): {e}");
             }
         }
     }
