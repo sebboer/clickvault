@@ -6,11 +6,16 @@ database = "mydb"
 
 [s3]
 endpoint = "https://s3.amazonaws.com"
+# S3 endpoint as reachable from the ClickHouse server, if different from the
+# above — e.g. a Docker-internal URL like "http://minio:9000". Defaults to
+# `endpoint`.
+# clickhouse_endpoint = "http://minio:9000"
 bucket = "my-backup-bucket"
 prefix = "clickhouse-backups"
 region = "eu-central-1"
 # access_key = "AKIA..."       # or set CLICKVAULT_S3_ACCESS_KEY
 # secret_key = "..."           # or set CLICKVAULT_S3_SECRET_KEY
+# path_style = true            # required for MinIO/RustFS
 
 # Backup execution tuning (optional; defaults shown).
 # [backup]

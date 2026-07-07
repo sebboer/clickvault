@@ -41,10 +41,11 @@ You are cutting release **v$ARGUMENTS** of the `clickvault` crate. `$ARGUMENTS` 
 - In `Cargo.toml`, change the package `version` (the first `^version =` line) to `$ARGUMENTS`.
 - Run `cargo check` — this updates the `clickvault` entry in `Cargo.lock` to match and confirms the bumped manifest still builds.
 - Confirm both `Cargo.toml` and `Cargo.lock` now show `$ARGUMENTS`. `release.yml` fails the release if the tag and the Cargo.toml version disagree.
+- Update the install pin in `README.md` (the `cargo install clickvault --version ...` line) to `$ARGUMENTS`.
 
 ### 4. Commit and tag
 
-- Stage `CHANGELOG.md`, `Cargo.toml`, and `Cargo.lock`.
+- Stage `CHANGELOG.md`, `Cargo.toml`, `Cargo.lock`, and `README.md`.
 - Commit with message: `chore(release): v$ARGUMENTS`
 - Create an annotated tag: `git tag -a v$ARGUMENTS -m "Release v$ARGUMENTS"`
 

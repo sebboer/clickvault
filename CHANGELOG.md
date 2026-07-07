@@ -9,9 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `check` command for backup-staleness monitoring: exits non-zero when the
+  newest backup is older than `--max-age` (or none exists), with a one-line
+  human summary or `--json` output for healthchecks.io/Nagios-style probes.
+- Optional `[backup]` config section: `poll_interval_secs` (default 5) and
+  `timeout_secs` (default 86400) replace the previously hardcoded progress
+  polling constants.
+- `retention.auto_cleanup` (default `false`): run cleanup automatically after
+  each successful backup instead of a separate cron entry; auto-cleanup
+  problems are logged but never fail the backup run.
 - Unit test suite covering chain discovery/grouping and deep-chain tracing,
   retention selection, S3 path/SQL-fragment building and escaping, notification
-  filtering/serialization, and config validation.
+  filtering/serialization, config validation and secret redaction, backup-kind
+  decision, poll status classification, staleness evaluation, and duration
+  parsing.
 - CI workflow (`cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`)
   running on every push to `main` and every pull request.
 
@@ -22,6 +33,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Cleanup no longer acts on an incomplete view: a metadata sidecar that exists
+  but cannot be read or parsed aborts the run instead of silently shifting the
+  retention window (missing sidecars are still skipped as orphans).
+- Cleanup handles partial deletion failures: per-object failures no longer
+  abort a prefix, the metadata sidecar is deleted last (so interrupted
+  deletions stay discoverable and retryable), a chain's full backup is only
+  removed once all its incrementals are gone, and partial failures surface in
+  the report and a non-zero exit code.
+- Backup polling survives the `system.backups` row disappearing (e.g. a
+  ClickHouse restart): tolerated for a few polls, then failed with a dedicated
+  error and the orphaned backup data rolled back.
+- `BACKUP_CANCELLED` is treated as a terminal failure, and unrecognized backup
+  statuses fail fast instead of spinning until the overall timeout.
+- Failure notifications report the backup kind the run actually decided on;
+  an interval-promoted full backup is no longer mislabeled as incremental.
 - Backup id is now read directly from the `BACKUP ... ASYNC` result instead of a
   racy `system.backups` lookup that could attach to the wrong backup.
 - The database identifier is backtick-quoted and S3 credentials/paths are
@@ -30,6 +56,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write fails, and metadata-less backup directories are surfaced as warnings.
 - Backup S3 paths use millisecond precision to avoid two backups colliding on
   the same prefix within a single second.
+
+### Security
+
+- Backup error text is redacted before reaching logs, stderr, or notification
+  payloads: ClickHouse can echo the `BACKUP` statement with its inline S3
+  credentials (verified for syntax errors), so configured secrets are masked
+  with `***`.
 
 ## [0.1.0-alpha.4] - 2026-05-23
 

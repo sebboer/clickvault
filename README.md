@@ -25,8 +25,11 @@ ClickVault automates full and incremental backups with deep chaining, progress m
 
 ### From crates.io
 
+Pre-releases must be installed with an explicit version — check
+[crates.io/crates/clickvault](https://crates.io/crates/clickvault) for the latest:
+
 ```bash
-cargo install clickvault --version 0.1.0-alpha.1
+cargo install clickvault --version 0.1.0-alpha.4
 ```
 
 ### Docker
@@ -104,14 +107,16 @@ ClickVault uses a TOML configuration file. See [config.example.toml](config.exam
 
 #### `[s3]`
 
-| Key          | Required | Description                                 |
-| ------------ | -------- | ------------------------------------------- |
-| `endpoint`   | yes      | S3 endpoint URL                             |
-| `bucket`     | yes      | Bucket name                                 |
-| `prefix`     | no       | Key prefix for all backups (default: empty) |
-| `region`     | yes      | S3 region                                   |
-| `access_key` | no       | S3 access key                               |
-| `secret_key` | no       | S3 secret key                               |
+| Key                   | Required | Description                                                                                         |
+| --------------------- | -------- | --------------------------------------------------------------------------------------------------- |
+| `endpoint`            | yes      | S3 endpoint URL (as reachable from where clickvault runs)                                            |
+| `clickhouse_endpoint` | no       | S3 endpoint as reachable from the ClickHouse server, e.g. a Docker-internal URL (default: `endpoint`) |
+| `bucket`              | yes      | Bucket name                                                                                          |
+| `prefix`              | no       | Key prefix for all backups (default: empty)                                                          |
+| `region`              | yes      | S3 region                                                                                            |
+| `access_key`          | no       | S3 access key                                                                                        |
+| `secret_key`          | no       | S3 secret key                                                                                        |
+| `path_style`          | no       | Use path-style S3 URLs — required for MinIO/RustFS (default: `false`)                                 |
 
 #### `[backup]`
 
@@ -194,10 +199,13 @@ Commands:
 
 ```
 Options:
-  --full    Force a full backup regardless of schedule
+  --full     Force a full backup regardless of schedule
+  --force    Skip the in-progress backup check (use when a previous backup is stuck)
 ```
 
 Without `--full`, the tool checks S3 for the latest full backup. If it's older than `full_backup_interval_days`, a full backup is created. Otherwise, an incremental backup is created chaining off the most recent backup.
+
+A run refuses to start while another backup is in `CREATING_BACKUP` state on the server; `--force` bypasses that guard, e.g. after a crashed run left a stuck entry in `system.backups`.
 
 ### `clickvault list`
 

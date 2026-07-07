@@ -310,6 +310,13 @@ mod tests {
     }
 
     #[test]
+    fn example_config_parses_and_validates() {
+        let cfg: Config =
+            toml::from_str(include_str!("../config.example.toml")).expect("example parses");
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
     fn auto_cleanup_defaults_off_and_parses() {
         let cfg = parse(VALID);
         assert!(!cfg.retention.auto_cleanup);

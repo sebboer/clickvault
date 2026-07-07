@@ -8,9 +8,9 @@ ClickVault is a Rust CLI tool that manages ClickHouse database backups to S3 usi
 
 The crate is published to [crates.io](https://crates.io/crates/clickvault) as an alpha release.
 
-- **Current version**: `0.1.0-alpha.1`
+- **Current version**: see `version` in `Cargo.toml` (do not duplicate it here — it drifts)
 - **Versioning**: semver with pre-release tags (`alpha.N` -> `beta.N` -> stable)
-- **Publish**: `cargo publish` (requires `cargo login` with a crates.io API token)
+- **Release**: use the `/release` skill (`.claude/skills/release/`) — it updates CHANGELOG.md, bumps Cargo.toml/Cargo.lock and the README install pin, commits, tags, and pushes; the `v*` tag triggers `release.yml`
 - **Dry-run**: `cargo publish --dry-run` to validate before publishing
 - **Excluded from package**: `hack/`, `.claude/` (via `exclude` in Cargo.toml)
 
@@ -93,7 +93,10 @@ notify/* -> config.rs (provider config)
 Unit tests cover the pure logic (no ClickHouse/S3 required): chain grouping and
 deep-chain tracing (`backup/discovery.rs`), retention selection (`cleanup.rs`),
 S3 path/SQL-fragment building and escaping (`s3.rs`), notification
-filtering/serialization (`notify/mod.rs`), and config validation (`config.rs`).
+filtering/serialization (`notify/mod.rs`), config validation and secret
+redaction (`config.rs`), backup-kind decision (`backup/executor.rs`), poll
+status classification (`backup/progress.rs`), staleness evaluation
+(`check.rs`), and duration parsing (`cli.rs`).
 
 ```bash
 cargo test              # run the unit test suite
