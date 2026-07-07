@@ -21,16 +21,32 @@ impl std::fmt::Display for BackupKind {
     }
 }
 
+/// Schema version this build writes into `.clickvault_meta.json` sidecars.
+/// Bump when the metadata shape changes. Sidecars written before versioning
+/// deserialize as version 0.
+pub const METADATA_SCHEMA_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackupMetadata {
+    /// Sidecar schema version (see [`METADATA_SCHEMA_VERSION`]).
+    #[serde(default)]
+    pub version: u32,
     pub backup_id: String,
     pub kind: BackupKind,
+    /// Submission time (also encoded in the S3 path); chain ordering and the
+    /// full-backup interval key off this.
     pub timestamp: DateTime<Utc>,
     /// S3 path of the backup this one is based on (for incremental backups).
     pub base_backup_path: Option<String>,
     pub status: String,
     pub total_size: u64,
     pub database: String,
+    /// Actual start of the backup as recorded by ClickHouse in system.backups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    /// Actual end of the backup as recorded by ClickHouse in system.backups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<DateTime<Utc>>,
 }
 
 /// A full backup and all its chained incrementals.
@@ -58,6 +74,7 @@ mod tests {
 
     fn md(kind: BackupKind) -> BackupMetadata {
         BackupMetadata {
+            version: METADATA_SCHEMA_VERSION,
             backup_id: "id".into(),
             kind,
             timestamp: Utc::now(),
@@ -65,7 +82,50 @@ mod tests {
             status: "BACKUP_CREATED".into(),
             total_size: 42,
             database: "db".into(),
+            started_at: None,
+            finished_at: None,
         }
+    }
+
+    #[test]
+    fn pre_versioning_sidecar_still_deserializes() {
+        // Exact shape written by clickvault before the version field existed.
+        let json = r#"{
+            "backup_id": "abc",
+            "kind": "incremental",
+            "timestamp": "2026-05-01T02:03:04.567Z",
+            "base_backup_path": "backups/full/20260430T000000000Z/",
+            "status": "BACKUP_CREATED",
+            "total_size": 123,
+            "database": "mydb"
+        }"#;
+        let meta: BackupMetadata = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.version, 0);
+        assert_eq!(meta.started_at, None);
+        assert_eq!(meta.finished_at, None);
+        assert_eq!(meta.kind, BackupKind::Incremental);
+    }
+
+    #[test]
+    fn versioned_sidecar_roundtrips_backup_window() {
+        let mut meta = md(BackupKind::Full);
+        meta.started_at = chrono::DateTime::from_timestamp(1_760_000_000, 0);
+        meta.finished_at = chrono::DateTime::from_timestamp(1_760_000_120, 0);
+
+        let json = serde_json::to_value(&meta).unwrap();
+        assert_eq!(json["version"], METADATA_SCHEMA_VERSION);
+        assert!(json["started_at"].is_string());
+
+        let back: BackupMetadata = serde_json::from_value(json).unwrap();
+        assert_eq!(back.started_at, meta.started_at);
+        assert_eq!(back.finished_at, meta.finished_at);
+    }
+
+    #[test]
+    fn unset_backup_window_is_omitted_from_json() {
+        let json = serde_json::to_value(md(BackupKind::Full)).unwrap();
+        assert!(json.get("started_at").is_none());
+        assert!(json.get("finished_at").is_none());
     }
 
     #[test]

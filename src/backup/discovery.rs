@@ -227,6 +227,7 @@ mod tests {
 
     fn md(kind: BackupKind, ts: DateTime<Utc>, base: Option<&str>) -> BackupMetadata {
         BackupMetadata {
+            version: crate::backup::METADATA_SCHEMA_VERSION,
             backup_id: "id".into(),
             kind,
             timestamp: ts,
@@ -234,6 +235,8 @@ mod tests {
             status: "BACKUP_CREATED".into(),
             total_size: 0,
             database: "db".into(),
+            started_at: None,
+            finished_at: None,
         }
     }
 

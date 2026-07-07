@@ -143,6 +143,7 @@ mod tests {
         BackupChain {
             full_path: path.into(),
             full: BackupMetadata {
+                version: crate::backup::METADATA_SCHEMA_VERSION,
                 backup_id: "id".into(),
                 kind: BackupKind::Full,
                 timestamp: Utc::now(),
@@ -150,6 +151,8 @@ mod tests {
                 status: "BACKUP_CREATED".into(),
                 total_size: 0,
                 database: "db".into(),
+                started_at: None,
+                finished_at: None,
             },
             incrementals: vec![],
         }

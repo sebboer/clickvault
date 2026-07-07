@@ -7,7 +7,7 @@ use tracing::{error, info, warn};
 
 use super::discovery;
 use super::progress;
-use super::{BackupChain, BackupKind, BackupMetadata};
+use super::{BackupChain, BackupKind, BackupMetadata, METADATA_SCHEMA_VERSION};
 use crate::config::Config;
 use crate::error::ClickVaultError;
 use crate::s3 as s3_helpers;
@@ -185,10 +185,13 @@ async fn execute_backup(
     let duration = start.elapsed();
 
     let metadata = BackupMetadata {
+        version: METADATA_SCHEMA_VERSION,
         backup_id: backup_id.clone(),
         kind,
         timestamp: now,
         base_backup_path: base_path,
+        started_at: status.started_at(),
+        finished_at: status.finished_at(),
         status: status.status,
         total_size: status.total_size,
         database: config.clickhouse.database.clone(),
@@ -242,12 +245,10 @@ async fn rollback_orphaned_backup(bucket: &Bucket, backup_path: &str) {
 
 async fn check_no_backup_in_progress(client: &Client) -> Result<(), ClickVaultError> {
     let in_progress: Vec<progress::BackupStatus> = client
-        .query(
-            "SELECT id, toString(status) as status, toString(start_time) as start_time, \
-             toString(end_time) as end_time, total_size, \
-             ifNull(error, '') as error \
-             FROM system.backups WHERE status = 'CREATING_BACKUP'",
-        )
+        .query(&format!(
+            "SELECT {} FROM system.backups WHERE status = 'CREATING_BACKUP'",
+            progress::BACKUP_STATUS_COLUMNS
+        ))
         .fetch_all()
         .await?;
 
@@ -294,6 +295,7 @@ mod tests {
 
     fn full_backup(age_days: i64) -> BackupMetadata {
         BackupMetadata {
+            version: METADATA_SCHEMA_VERSION,
             backup_id: "id".into(),
             kind: BackupKind::Full,
             timestamp: Utc::now() - ChronoDuration::days(age_days),
@@ -301,6 +303,8 @@ mod tests {
             status: "BACKUP_CREATED".into(),
             total_size: 0,
             database: "db".into(),
+            started_at: None,
+            finished_at: None,
         }
     }
 

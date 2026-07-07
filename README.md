@@ -266,7 +266,7 @@ When the configured interval elapses, a new full backup starts a fresh chain.
 {prefix}/incremental/{YYYYMMDD}T{HHMMSS}Z/.clickvault_meta.json
 ```
 
-The metadata sidecar file tracks backup kind, timestamp, chain linkage (`base_backup_path`), size, and status.
+The metadata sidecar file tracks a schema version, backup kind, submission timestamp, the actual backup window (`started_at`/`finished_at` as recorded by ClickHouse), chain linkage (`base_backup_path`), size, and status.
 
 ### Retention
 

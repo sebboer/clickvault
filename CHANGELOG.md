@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Metadata sidecars now carry a schema `version` field for forward
+  compatibility (older sidecars deserialize as version 0; sidecars from a
+  newer clickvault log a warning instead of being skipped) and record the
+  actual backup window (`started_at`/`finished_at` as recorded by ClickHouse
+  in `system.backups`) alongside the submission timestamp.
 - `check` command for backup-staleness monitoring: exits non-zero when the
   newest backup is older than `--max-age` (or none exists), with a one-line
   human summary or `--json` output for healthchecks.io/Nagios-style probes.

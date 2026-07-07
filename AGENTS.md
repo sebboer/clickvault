@@ -50,7 +50,7 @@ notify/* -> config.rs (provider config)
 - **Deep incremental chaining**: each incremental references the previous backup (not the full). This minimizes incremental size for frequent backups. Chain tracing logic is in `src/backup/discovery.rs:find_chain_for_incremental()`.
 - **Dual S3 usage**: ClickHouse writes backup data via its native `BACKUP ... TO S3()` SQL. The `rust-s3` crate is used separately for management operations (listing, metadata, deletion). They operate on the same bucket but don't interfere.
 - **ASYNC backups**: all backups use the `ASYNC` keyword so ClickHouse runs them in the background. The tool polls `system.backups` for progress (`src/backup/progress.rs`).
-- **Metadata sidecar files**: `.clickvault_meta.json` is written alongside each backup in S3 to track chain linkage, kind, timestamp, size. The dot prefix prevents ClickHouse from treating it as backup data.
+- **Metadata sidecar files**: `.clickvault_meta.json` is written alongside each backup in S3 to track chain linkage, kind, timestamps (submission plus the actual `started_at`/`finished_at` window from `system.backups`), size, and a schema `version` (`METADATA_SCHEMA_VERSION` in `src/backup/mod.rs` — bump it when the shape changes; pre-versioning sidecars deserialize as version 0). The dot prefix prevents ClickHouse from treating it as backup data.
 - **Notifications are non-fatal**: notification dispatch failures are logged as warnings but never cause the tool to exit with an error.
 - **Credentials via env vars**: `CLICKVAULT_CLICKHOUSE_USER`, `CLICKVAULT_CLICKHOUSE_PASSWORD`, `CLICKVAULT_S3_ACCESS_KEY`, `CLICKVAULT_S3_SECRET_KEY` override TOML values.
 

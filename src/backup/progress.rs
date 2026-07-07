@@ -1,10 +1,25 @@
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use clickhouse::Client;
 use serde::Deserialize;
 use tracing::{info, warn};
 
 use crate::error::ClickVaultError;
+
+/// Column list shared by every SELECT that reads system.backups into a
+/// [`BackupStatus`]. Order must match the struct's field order (RowBinary
+/// is positional).
+///
+/// The `start_ts`/`end_ts` expressions use table-qualified column names:
+/// `toString(start_time) AS start_time` shadows the column with a String
+/// alias, and a bare `toUnixTimestamp(start_time)` would resolve to that
+/// alias and fail to parse.
+pub const BACKUP_STATUS_COLUMNS: &str = "id, toString(status) AS status, \
+     toString(start_time) AS start_time, toString(end_time) AS end_time, \
+     toUnixTimestamp(system.backups.start_time) AS start_ts, \
+     toUnixTimestamp(system.backups.end_time) AS end_ts, \
+     total_size, ifNull(error, '') AS error";
 
 #[derive(Debug, Clone, Deserialize, clickhouse::Row)]
 pub struct BackupStatus {
@@ -12,8 +27,29 @@ pub struct BackupStatus {
     pub status: String,
     pub start_time: String,
     pub end_time: String,
+    start_ts: u32,
+    end_ts: u32,
     pub total_size: u64,
     pub error: String,
+}
+
+impl BackupStatus {
+    /// Actual start of the backup as recorded by ClickHouse (UTC).
+    pub fn started_at(&self) -> Option<DateTime<Utc>> {
+        epoch_secs(self.start_ts)
+    }
+
+    /// Actual end of the backup as recorded by ClickHouse (UTC); `None`
+    /// while the backup is still running.
+    pub fn finished_at(&self) -> Option<DateTime<Utc>> {
+        epoch_secs(self.end_ts)
+    }
+}
+
+fn epoch_secs(secs: u32) -> Option<DateTime<Utc>> {
+    (secs != 0)
+        .then(|| DateTime::from_timestamp(secs as i64, 0))
+        .flatten()
 }
 
 /// How many consecutive polls may find no row in system.backups before the
@@ -144,12 +180,9 @@ async fn get_backup_status(
     backup_id: &str,
 ) -> Result<Option<BackupStatus>, ClickVaultError> {
     let status = client
-        .query(
-            "SELECT id, toString(status) as status, toString(start_time) as start_time, \
-             toString(end_time) as end_time, total_size, \
-             ifNull(error, '') as error \
-             FROM system.backups WHERE id = ?",
-        )
+        .query(&format!(
+            "SELECT {BACKUP_STATUS_COLUMNS} FROM system.backups WHERE id = ?"
+        ))
         .bind(backup_id)
         .fetch_optional::<BackupStatus>()
         .await?;
@@ -163,13 +196,10 @@ pub async fn get_recent_backups(
     limit: u32,
 ) -> Result<Vec<BackupStatus>, ClickVaultError> {
     let statuses = client
-        .query(
-            "SELECT id, toString(status) as status, toString(start_time) as start_time, \
-             toString(end_time) as end_time, total_size, \
-             ifNull(error, '') as error \
-             FROM system.backups \
-             ORDER BY start_time DESC LIMIT ?",
-        )
+        .query(&format!(
+            "SELECT {BACKUP_STATUS_COLUMNS} FROM system.backups \
+             ORDER BY start_time DESC LIMIT ?"
+        ))
         .bind(limit)
         .fetch_all::<BackupStatus>()
         .await?;
@@ -187,9 +217,29 @@ mod tests {
             status: s.into(),
             start_time: String::new(),
             end_time: String::new(),
+            start_ts: 0,
+            end_ts: 0,
             total_size: 0,
             error: error.into(),
         }
+    }
+
+    #[test]
+    fn backup_window_accessors_treat_epoch_zero_as_unset() {
+        let mut s = status("BACKUP_CREATED", "");
+        assert_eq!(s.started_at(), None);
+        assert_eq!(s.finished_at(), None);
+
+        s.start_ts = 1_760_000_000;
+        s.end_ts = 1_760_000_120;
+        assert_eq!(
+            s.started_at().unwrap(),
+            DateTime::from_timestamp(1_760_000_000, 0).unwrap()
+        );
+        assert_eq!(
+            (s.finished_at().unwrap() - s.started_at().unwrap()).num_seconds(),
+            120
+        );
     }
 
     #[test]

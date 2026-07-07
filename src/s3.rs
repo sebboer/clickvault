@@ -120,6 +120,16 @@ pub async fn read_metadata(
         .await
         .map_err(classify_read_error)?;
     let meta: BackupMetadata = serde_json::from_slice(response.as_slice())?;
+
+    if meta.version > crate::backup::METADATA_SCHEMA_VERSION {
+        warn!(
+            path = %path,
+            version = meta.version,
+            supported = crate::backup::METADATA_SCHEMA_VERSION,
+            "Metadata sidecar was written by a newer clickvault; unknown fields are ignored"
+        );
+    }
+
     Ok(meta)
 }
 
