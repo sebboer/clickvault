@@ -33,8 +33,13 @@ pub fn build_bucket(config: &S3Config) -> Result<Box<Bucket>, ClickVaultError> {
     Ok(bucket)
 }
 
+/// Timestamp format for backup paths. Millisecond precision keeps two backups
+/// started in the same second (e.g. a forced run racing a scheduled one) from
+/// colliding on the same S3 prefix.
+const PATH_TIMESTAMP_FORMAT: &str = "%Y%m%dT%H%M%S%3fZ";
+
 pub fn full_backup_path(prefix: &str, timestamp: &DateTime<Utc>) -> String {
-    let ts = timestamp.format("%Y%m%dT%H%M%SZ");
+    let ts = timestamp.format(PATH_TIMESTAMP_FORMAT);
     if prefix.is_empty() {
         format!("full/{ts}/")
     } else {
@@ -43,12 +48,17 @@ pub fn full_backup_path(prefix: &str, timestamp: &DateTime<Utc>) -> String {
 }
 
 pub fn incremental_backup_path(prefix: &str, timestamp: &DateTime<Utc>) -> String {
-    let ts = timestamp.format("%Y%m%dT%H%M%SZ");
+    let ts = timestamp.format(PATH_TIMESTAMP_FORMAT);
     if prefix.is_empty() {
         format!("incremental/{ts}/")
     } else {
         format!("{prefix}/incremental/{ts}/")
     }
+}
+
+/// Escapes a value for inclusion in a single-quoted ClickHouse string literal.
+fn escape_sql_str(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
 /// Builds the S3() SQL fragment for use in ClickHouse BACKUP/RESTORE commands.
@@ -57,7 +67,12 @@ pub fn s3_sql_fragment(config: &S3Config, path: &str) -> String {
     let url = format!("{}/{}/{}", config.clickhouse_endpoint(), config.bucket, path);
     let access_key = config.access_key.as_deref().unwrap_or("");
     let secret_key = config.secret_key.as_deref().unwrap_or("");
-    format!("S3('{url}', '{access_key}', '{secret_key}')")
+    format!(
+        "S3('{}', '{}', '{}')",
+        escape_sql_str(&url),
+        escape_sql_str(access_key),
+        escape_sql_str(secret_key)
+    )
 }
 
 pub fn metadata_path(backup_path: &str) -> String {
