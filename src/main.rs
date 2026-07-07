@@ -1,4 +1,5 @@
 mod backup;
+mod check;
 mod cleanup;
 mod cli;
 mod config;
@@ -140,6 +141,21 @@ async fn main() -> anyhow::Result<()> {
                     "{:<38} {:<18} {:<22} {:<22} {:>12}  {}",
                     s.id, s.status, s.start_time, s.end_time, s.total_size, s.error
                 );
+            }
+        }
+
+        Command::Check { max_age, json } => {
+            let chains = backup::discovery::discover_chains(&bucket, &config.s3.prefix).await?;
+            let report = check::evaluate(&chains, chrono::Utc::now(), max_age);
+
+            if json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                println!("{}", report.human_line());
+            }
+
+            if !report.is_healthy() {
+                std::process::exit(1);
             }
         }
 

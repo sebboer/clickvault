@@ -185,6 +185,7 @@ Commands:
   backup    Run a backup (auto-detects full vs incremental)
   list      List known backups in S3
   status    Show status of running and recent backups
+  check     Check that the newest backup is fresh enough (exit code for monitoring)
   cleanup   Clean up expired backup chains
 ```
 
@@ -202,6 +203,24 @@ Without `--full`, the tool checks S3 for the latest full backup. If it's older t
 ```
 Options:
   --full-only    Show only full backups
+```
+
+### `clickvault check`
+
+```
+Options:
+  --max-age <DURATION>    Maximum acceptable age of the newest backup (e.g. 90s, 30m, 26h, 2d)
+  --json                  Print the summary as JSON
+```
+
+Exits `0` when the newest backup is younger than `--max-age`, non-zero when it is older or no backups exist. Designed for pull-based monitoring: cron silently dying is otherwise invisible until a restore is needed.
+
+```console
+$ clickvault check --max-age 26h
+OK: last backup incremental at 2026-07-07T22:36:32Z (age 2h13m, max 26h), 2 chain(s)
+
+$ clickvault check --max-age 26h --json
+{"status":"ok","kind":"incremental","timestamp":"2026-07-07T22:36:32Z","age_secs":8012,"max_age_secs":93600,"chains":2}
 ```
 
 ### `clickvault cleanup`
@@ -252,6 +271,9 @@ Cleanup operates on entire chains. With `keep_full_backups = 4`, the 4 most rece
 
 # Cleanup once daily at 03:00
 0 3 * * * /usr/local/bin/clickvault cleanup --config /etc/clickvault/config.toml
+
+# Alert when backups silently stop (pair with healthchecks.io, Nagios, etc.)
+*/30 * * * * /usr/local/bin/clickvault check --max-age 26h --config /etc/clickvault/config.toml || notify-oncall
 ```
 
 ### Docker Usage

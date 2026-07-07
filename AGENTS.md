@@ -29,6 +29,7 @@ Run with a config file:
 cargo run -- backup --config config.example.toml
 cargo run -- list --config config.example.toml
 cargo run -- status --config config.example.toml
+cargo run -- check --max-age 26h --config config.example.toml
 cargo run -- cleanup --dry-run --config config.example.toml
 ```
 
