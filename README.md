@@ -125,6 +125,14 @@ ClickVault uses a TOML configuration file. See [config.example.toml](config.exam
 | `poll_interval_secs` | no       | Seconds between backup progress polls (default: `5`)               |
 | `timeout_secs`       | no       | Give up on a backup after this many seconds (default: `86400`/24h) |
 
+#### `[retry]`
+
+| Key             | Required | Description                                                                  |
+| --------------- | -------- | ---------------------------------------------------------------------------- |
+| `attempts`      | no       | Total attempts per S3/ClickHouse-read/notification operation (default: `3`)  |
+| `base_delay_ms` | no       | First backoff, doubling per attempt with jitter (default: `200`)              |
+| `max_delay_ms`  | no       | Ceiling for a single backoff sleep (default: `5000`)                          |
+
 #### `[schedule]`
 
 | Key                         | Required | Description                           |

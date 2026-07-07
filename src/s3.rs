@@ -8,10 +8,29 @@ use tracing::warn;
 use crate::backup::BackupMetadata;
 use crate::config::S3Config;
 use crate::error::{ClickVaultError, MetadataReadError};
+use crate::retry::{self, RetryPolicy};
 
 const METADATA_FILENAME: &str = ".clickvault_meta.json";
 
+/// Whether an S3 error is worth retrying: transport-level failures and
+/// throttling/server-side HTTP statuses. Other 4xx (403, 404, ...) are
+/// definitive answers, not blips.
+fn is_transient_s3(e: &S3Error) -> bool {
+    match e {
+        S3Error::HttpFailWithBody(status, _) => {
+            matches!(status, 408 | 429) || (500..=599).contains(status)
+        }
+        S3Error::Reqwest(_) | S3Error::Io(_) => true,
+        _ => false,
+    }
+}
+
 pub fn build_bucket(config: &S3Config) -> Result<Box<Bucket>, ClickVaultError> {
+    // Disable rust-s3's built-in retry: it blindly retries every error --
+    // including 404s -- with un-jittered quadratic delays. Retrying is
+    // handled selectively by crate::retry at each call site instead.
+    s3::set_retries(0);
+
     let region = Region::Custom {
         region: config.region.clone(),
         endpoint: config.endpoint.clone(),
@@ -91,13 +110,15 @@ pub async fn write_metadata(
     bucket: &Bucket,
     backup_path: &str,
     meta: &BackupMetadata,
+    policy: &RetryPolicy,
 ) -> Result<(), ClickVaultError> {
     let json = serde_json::to_string_pretty(meta)?;
     let path = metadata_path(backup_path);
-    bucket
-        .put_object(&path, json.as_bytes())
-        .await
-        .map_err(ClickVaultError::S3)?;
+    retry::with_retry(policy, "s3 put metadata", is_transient_s3, || {
+        bucket.put_object(&path, json.as_bytes())
+    })
+    .await
+    .map_err(ClickVaultError::S3)?;
     Ok(())
 }
 
@@ -114,12 +135,16 @@ fn classify_read_error(e: S3Error) -> MetadataReadError {
 pub async fn read_metadata(
     bucket: &Bucket,
     backup_path: &str,
+    policy: &RetryPolicy,
 ) -> Result<BackupMetadata, MetadataReadError> {
     let path = metadata_path(backup_path);
-    let response = bucket
-        .get_object(&path)
-        .await
-        .map_err(classify_read_error)?;
+    // Retried on the raw S3 error before classification: a 404 is a
+    // definitive "missing" answer and is never retried.
+    let response = retry::with_retry(policy, "s3 get metadata", is_transient_s3, || {
+        bucket.get_object(&path)
+    })
+    .await
+    .map_err(classify_read_error)?;
     let meta: BackupMetadata = serde_json::from_slice(response.as_slice())?;
 
     if meta.version > crate::backup::METADATA_SCHEMA_VERSION {
@@ -139,11 +164,16 @@ pub async fn read_metadata(
 ///
 /// `Bucket::list` paginates internally and returns every result page, so no
 /// continuation-token handling is needed here.
-pub async fn list_prefixes(bucket: &Bucket, prefix: &str) -> Result<Vec<String>, ClickVaultError> {
-    let results = bucket
-        .list(prefix.to_string(), Some("/".to_string()))
-        .await
-        .map_err(ClickVaultError::S3)?;
+pub async fn list_prefixes(
+    bucket: &Bucket,
+    prefix: &str,
+    policy: &RetryPolicy,
+) -> Result<Vec<String>, ClickVaultError> {
+    let results = retry::with_retry(policy, "s3 list", is_transient_s3, || {
+        bucket.list(prefix.to_string(), Some("/".to_string()))
+    })
+    .await
+    .map_err(ClickVaultError::S3)?;
 
     let mut prefixes: Vec<String> = results
         .iter()
@@ -177,41 +207,71 @@ fn split_sidecar_last(keys: Vec<String>, sidecar: &str) -> (Vec<String>, Vec<Str
     keys.into_iter().partition(|key| key != sidecar)
 }
 
-/// Folds a batch-delete response into the outcome. Every submitted key
-/// without an error entry counts as deleted: S3 reports nonexistent keys as
-/// deleted, and some implementations omit `Deleted` entries entirely
-/// (quiet-mode responses), so `result.deleted` is not trusted for counting.
-fn apply_batch_result(outcome: &mut DeleteOutcome, submitted: u64, result: &DeleteObjectsResult) {
+/// Extracts the keys that came back as per-key errors from a batch-delete
+/// response, warning for each. Every submitted key without an error entry
+/// counts as deleted: S3 reports nonexistent keys as deleted, and some
+/// implementations omit `Deleted` entries entirely (quiet-mode responses),
+/// so `result.deleted` is not trusted for counting.
+fn batch_errored_keys(result: &DeleteObjectsResult) -> Vec<String> {
     for err in &result.errors {
         warn!(key = %err.key, code = %err.code, message = %err.message, "Failed to delete object");
     }
-    outcome.failed += result.errors.len() as u64;
-    outcome.deleted += submitted - result.errors.len() as u64;
+    result.errors.iter().map(|err| err.key.clone()).collect()
 }
 
 /// Deletes keys via the batch DeleteObjects API (rust-s3 chunks into
-/// requests of up to 1000 keys), continuing past per-key failures.
-async fn delete_keys(bucket: &Bucket, keys: &[String], outcome: &mut DeleteOutcome) {
-    if keys.is_empty() {
-        return;
-    }
+/// requests of up to 1000 keys). Deletes are idempotent, so both a failed
+/// request and individual errored keys are retried with backoff, up to
+/// `policy.attempts`; whatever still fails feeds the outcome's `failed`
+/// count.
+async fn delete_keys(
+    bucket: &Bucket,
+    keys: &[String],
+    policy: &RetryPolicy,
+    outcome: &mut DeleteOutcome,
+) {
+    let mut pending: Vec<String> = keys.to_vec();
 
-    let submitted = keys.len() as u64;
-    let ids: Vec<ObjectIdentifier> = keys
-        .iter()
-        .map(|key| ObjectIdentifier::new(key.as_str()))
-        .collect();
+    for attempt in 0..policy.attempts {
+        if pending.is_empty() {
+            return;
+        }
 
-    match bucket.delete_objects(ids).await {
-        Ok(result) => apply_batch_result(outcome, submitted, &result),
-        Err(e) => {
-            // Whole-request failure: per-key state is unknown. Deletes are
-            // idempotent and the sidecar stays in place, so the next cleanup
-            // run simply retries.
-            warn!(error = %e, keys = submitted, "Batch delete request failed");
-            outcome.failed += submitted;
+        let submitted = pending.len() as u64;
+        let ids: Vec<ObjectIdentifier> = pending
+            .iter()
+            .map(|key| ObjectIdentifier::new(key.as_str()))
+            .collect();
+
+        match bucket.delete_objects(ids).await {
+            Ok(result) => {
+                let errored = batch_errored_keys(&result);
+                outcome.deleted += submitted - errored.len() as u64;
+                if errored.is_empty() {
+                    return;
+                }
+                pending = errored;
+            }
+            Err(e) if is_transient_s3(&e) && attempt + 1 < policy.attempts => {
+                warn!(error = %e, keys = submitted, "Batch delete request failed; retrying");
+            }
+            Err(e) => {
+                // Definitive failure (or attempts exhausted): per-key state
+                // is unknown, but deletes are idempotent and the sidecar
+                // stays in place, so the next cleanup run simply retries.
+                warn!(error = %e, keys = submitted, "Batch delete request failed");
+                outcome.failed += submitted;
+                return;
+            }
+        }
+
+        if attempt + 1 < policy.attempts {
+            tokio::time::sleep(retry::backoff_delay(policy, attempt)).await;
         }
     }
+
+    // Attempts exhausted with per-key errors still outstanding.
+    outcome.failed += pending.len() as u64;
 }
 
 /// Deletes all objects under a given prefix, continuing past individual
@@ -220,11 +280,13 @@ async fn delete_keys(bucket: &Bucket, keys: &[String], outcome: &mut DeleteOutco
 pub async fn delete_prefix(
     bucket: &Bucket,
     prefix: &str,
+    policy: &RetryPolicy,
 ) -> Result<DeleteOutcome, ClickVaultError> {
-    let results = bucket
-        .list(prefix.to_string(), None)
-        .await
-        .map_err(ClickVaultError::S3)?;
+    let results = retry::with_retry(policy, "s3 list for delete", is_transient_s3, || {
+        bucket.list(prefix.to_string(), None)
+    })
+    .await
+    .map_err(ClickVaultError::S3)?;
 
     let keys: Vec<String> = results
         .iter()
@@ -233,10 +295,10 @@ pub async fn delete_prefix(
     let (data_keys, sidecar_keys) = split_sidecar_last(keys, &metadata_path(prefix));
 
     let mut outcome = DeleteOutcome::default();
-    delete_keys(bucket, &data_keys, &mut outcome).await;
+    delete_keys(bucket, &data_keys, policy, &mut outcome).await;
 
     if outcome.failed == 0 {
-        delete_keys(bucket, &sidecar_keys, &mut outcome).await;
+        delete_keys(bucket, &sidecar_keys, policy, &mut outcome).await;
     } else if !sidecar_keys.is_empty() {
         warn!(
             prefix = %prefix,
@@ -373,11 +435,11 @@ mod tests {
     }
 
     #[test]
-    fn apply_batch_result_counts_non_errored_keys_as_deleted() {
+    fn batch_errored_keys_extracts_only_error_entries() {
         use s3::serde_types::DeleteError;
 
-        // 5 keys submitted, 2 came back as errors; the response's Deleted
-        // list is deliberately empty (quiet-mode shape) and must not matter.
+        // The response's Deleted list is deliberately empty (quiet-mode
+        // shape) and must not matter: errors alone drive the accounting.
         let result = DeleteObjectsResult {
             deleted: vec![],
             errors: vec![
@@ -395,23 +457,42 @@ mod tests {
                 },
             ],
         };
+        assert_eq!(batch_errored_keys(&result), vec!["p/a", "p/b"]);
 
-        let mut outcome = DeleteOutcome::default();
-        apply_batch_result(&mut outcome, 5, &result);
-        assert_eq!(outcome.deleted, 3);
-        assert_eq!(outcome.failed, 2);
-        assert!(!outcome.is_complete());
-
-        // Clean response: everything counts as deleted.
         let clean = DeleteObjectsResult {
             deleted: vec![],
             errors: vec![],
         };
-        let mut outcome = DeleteOutcome::default();
-        apply_batch_result(&mut outcome, 4, &clean);
-        assert_eq!(outcome.deleted, 4);
-        assert_eq!(outcome.failed, 0);
-        assert!(outcome.is_complete());
+        assert!(batch_errored_keys(&clean).is_empty());
+    }
+
+    #[test]
+    fn is_transient_s3_classifies_statuses() {
+        assert!(is_transient_s3(&S3Error::HttpFailWithBody(
+            500,
+            String::new()
+        )));
+        assert!(is_transient_s3(&S3Error::HttpFailWithBody(
+            503,
+            String::new()
+        )));
+        assert!(is_transient_s3(&S3Error::HttpFailWithBody(
+            429,
+            String::new()
+        )));
+        assert!(is_transient_s3(&S3Error::HttpFailWithBody(
+            408,
+            String::new()
+        )));
+        assert!(!is_transient_s3(&S3Error::HttpFailWithBody(
+            404,
+            String::new()
+        )));
+        assert!(!is_transient_s3(&S3Error::HttpFailWithBody(
+            403,
+            String::new()
+        )));
+        assert!(is_transient_s3(&S3Error::Io(std::io::Error::other("x"))));
     }
 
     #[test]

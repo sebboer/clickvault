@@ -4,6 +4,7 @@ use tracing::{debug, warn};
 
 use super::{BackupChain, BackupMetadata};
 use crate::error::{ClickVaultError, MetadataReadError};
+use crate::retry::RetryPolicy;
 use crate::s3 as s3_helpers;
 
 /// How discovery reacts to metadata sidecars it cannot read.
@@ -34,12 +35,13 @@ async fn list_backups(
     bucket: &Bucket,
     dir_prefix: &str,
     policy: MetadataPolicy,
+    retry: &RetryPolicy,
 ) -> Result<Vec<(String, BackupMetadata)>, ClickVaultError> {
-    let dirs = s3_helpers::list_prefixes(bucket, dir_prefix).await?;
+    let dirs = s3_helpers::list_prefixes(bucket, dir_prefix, retry).await?;
     let mut backups = Vec::new();
 
     for dir in dirs {
-        match s3_helpers::read_metadata(bucket, &dir).await {
+        match s3_helpers::read_metadata(bucket, &dir, retry).await {
             Ok(meta) => backups.push((dir, meta)),
             Err(MetadataReadError::Missing) => {
                 warn!("Skipping backup at {dir} (no metadata sidecar, possible orphan)");
@@ -63,8 +65,9 @@ async fn list_backups(
 pub async fn discover_chains(
     bucket: &Bucket,
     prefix: &str,
+    retry: &RetryPolicy,
 ) -> Result<Vec<BackupChain>, ClickVaultError> {
-    discover_chains_with(bucket, prefix, MetadataPolicy::Lenient).await
+    discover_chains_with(bucket, prefix, MetadataPolicy::Lenient, retry).await
 }
 
 /// Like [`discover_chains`], but fails instead of skipping when a sidecar
@@ -73,17 +76,25 @@ pub async fn discover_chains(
 pub async fn discover_chains_strict(
     bucket: &Bucket,
     prefix: &str,
+    retry: &RetryPolicy,
 ) -> Result<Vec<BackupChain>, ClickVaultError> {
-    discover_chains_with(bucket, prefix, MetadataPolicy::Strict).await
+    discover_chains_with(bucket, prefix, MetadataPolicy::Strict, retry).await
 }
 
 async fn discover_chains_with(
     bucket: &Bucket,
     prefix: &str,
     policy: MetadataPolicy,
+    retry: &RetryPolicy,
 ) -> Result<Vec<BackupChain>, ClickVaultError> {
-    let fulls = list_backups(bucket, &segment_prefix(prefix, "full"), policy).await?;
-    let incrementals = list_backups(bucket, &segment_prefix(prefix, "incremental"), policy).await?;
+    let fulls = list_backups(bucket, &segment_prefix(prefix, "full"), policy, retry).await?;
+    let incrementals = list_backups(
+        bucket,
+        &segment_prefix(prefix, "incremental"),
+        policy,
+        retry,
+    )
+    .await?;
 
     Ok(group_chains(fulls, incrementals))
 }
@@ -186,22 +197,6 @@ fn find_chain_for_incremental(
     }
 
     None
-}
-
-/// Finds the latest backup across all chains (could be full or incremental).
-/// This is the backup that a new incremental should chain off of.
-#[allow(dead_code)]
-pub async fn latest_backup(
-    bucket: &Bucket,
-    prefix: &str,
-) -> Result<Option<(String, BackupMetadata)>, ClickVaultError> {
-    let chains = discover_chains(bucket, prefix).await?;
-
-    // Chains are sorted newest-first, so the first chain's latest backup is the overall latest.
-    Ok(chains.first().map(|chain| {
-        let (path, meta) = chain.latest();
-        (path.to_string(), meta.clone())
-    }))
 }
 
 /// Determines if a full backup should be performed based on the configured interval.

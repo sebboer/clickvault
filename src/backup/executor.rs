@@ -3,17 +3,15 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use clickhouse::Client;
 use s3::Bucket;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use super::discovery;
 use super::progress;
 use super::{BackupChain, BackupKind, BackupMetadata, METADATA_SCHEMA_VERSION};
 use crate::config::Config;
 use crate::error::ClickVaultError;
+use crate::retry::{self, RetryPolicy};
 use crate::s3 as s3_helpers;
-
-const METADATA_WRITE_ATTEMPTS: usize = 3;
-const METADATA_WRITE_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 /// Columns returned by a `BACKUP ... ASYNC` statement.
 #[derive(clickhouse::Row, serde::Deserialize)]
@@ -69,15 +67,16 @@ pub async fn run_backup(
     skip_in_progress_check: bool,
 ) -> Result<BackupResult, BackupRunError> {
     let undecided = |source| BackupRunError { kind: None, source };
+    let retry = config.retry.policy();
 
     if !skip_in_progress_check {
-        check_no_backup_in_progress(client)
+        check_no_backup_in_progress(client, &retry)
             .await
             .map_err(undecided)?;
     }
 
     // Discover existing backups to decide full vs incremental
-    let chains = discovery::discover_chains(bucket, &config.s3.prefix)
+    let chains = discovery::discover_chains(bucket, &config.s3.prefix, &retry)
         .await
         .map_err(undecided)?;
     let latest_full = chains.first().map(|c| &c.full);
@@ -105,6 +104,7 @@ async fn execute_backup(
 ) -> Result<BackupResult, ClickVaultError> {
     let prefix = &config.s3.prefix;
     let db = quote_ident(&config.clickhouse.database);
+    let retry = config.retry.policy();
 
     let now = Utc::now();
     let start = Instant::now();
@@ -144,6 +144,8 @@ async fn execute_backup(
     // Execute the BACKUP command. `ASYNC` returns the backup id (and initial
     // status) directly, so we read it from the result rather than guessing the
     // most recent row in system.backups (which races with concurrent activity).
+    // Never retried: submitting BACKUP is not idempotent -- a retry after an
+    // ambiguous failure could start a second backup.
     let submitted = client.query(&sql).fetch_one::<BackupSubmit>().await?;
     let backup_id = submitted.id;
 
@@ -166,6 +168,7 @@ async fn execute_backup(
         &backup_id,
         config.backup.poll_interval(),
         config.backup.timeout(),
+        &retry,
     )
     .await
     {
@@ -176,7 +179,7 @@ async fn execute_backup(
                 error = %e,
                 "Backup state lost; rolling back orphaned backup data"
             );
-            rollback_orphaned_backup(bucket, &backup_path).await;
+            rollback_orphaned_backup(bucket, &backup_path, &retry).await;
             return Err(e);
         }
         Err(e) => return Err(e),
@@ -197,16 +200,17 @@ async fn execute_backup(
         database: config.clickhouse.database.clone(),
     };
 
-    // Persist metadata. Without the sidecar the backup is invisible to
-    // discovery (an orphan that can never be listed, cleaned up, or chained
-    // off), so on definitive failure we roll back the orphaned data.
-    if let Err(e) = write_metadata_with_retry(bucket, &backup_path, &metadata).await {
+    // Persist metadata (retried internally on transient S3 errors). Without
+    // the sidecar the backup is invisible to discovery (an orphan that can
+    // never be listed, cleaned up, or chained off), so on definitive failure
+    // we roll back the orphaned data.
+    if let Err(e) = s3_helpers::write_metadata(bucket, &backup_path, &metadata, &retry).await {
         error!(
             path = %backup_path,
             error = %e,
             "Failed to write backup metadata after retries; rolling back orphaned backup data"
         );
-        rollback_orphaned_backup(bucket, &backup_path).await;
+        rollback_orphaned_backup(bucket, &backup_path, &retry).await;
         return Err(e);
     }
 
@@ -224,8 +228,8 @@ async fn execute_backup(
 /// Deletes backup data that will never get a metadata sidecar: without one
 /// the backup is invisible to discovery, so it could never be listed,
 /// cleaned up, or chained off.
-async fn rollback_orphaned_backup(bucket: &Bucket, backup_path: &str) {
-    match s3_helpers::delete_prefix(bucket, backup_path).await {
+async fn rollback_orphaned_backup(bucket: &Bucket, backup_path: &str, retry: &RetryPolicy) {
+    match s3_helpers::delete_prefix(bucket, backup_path, retry).await {
         Ok(outcome) if outcome.is_complete() => {
             info!(path = %backup_path, objects = outcome.deleted, "Rolled back orphaned backup data")
         }
@@ -243,49 +247,27 @@ async fn rollback_orphaned_backup(bucket: &Bucket, backup_path: &str) {
     }
 }
 
-async fn check_no_backup_in_progress(client: &Client) -> Result<(), ClickVaultError> {
-    let in_progress: Vec<progress::BackupStatus> = client
-        .query(&format!(
-            "SELECT {} FROM system.backups WHERE status = 'CREATING_BACKUP'",
-            progress::BACKUP_STATUS_COLUMNS
-        ))
-        .fetch_all()
-        .await?;
+async fn check_no_backup_in_progress(
+    client: &Client,
+    retry: &RetryPolicy,
+) -> Result<(), ClickVaultError> {
+    let sql = format!(
+        "SELECT {} FROM system.backups WHERE status = 'CREATING_BACKUP'",
+        progress::BACKUP_STATUS_COLUMNS
+    );
+    let in_progress: Vec<progress::BackupStatus> = retry::with_retry(
+        retry,
+        "in-progress check",
+        progress::is_transient_clickhouse,
+        || client.query(&sql).fetch_all(),
+    )
+    .await?;
 
     if let Some(bp) = in_progress.first() {
         return Err(ClickVaultError::BackupInProgress(bp.id.clone()));
     }
 
     Ok(())
-}
-
-/// Writes the metadata sidecar, retrying a few times on transient S3 errors.
-async fn write_metadata_with_retry(
-    bucket: &Bucket,
-    backup_path: &str,
-    metadata: &BackupMetadata,
-) -> Result<(), ClickVaultError> {
-    let mut last_err = None;
-
-    for attempt in 1..=METADATA_WRITE_ATTEMPTS {
-        match s3_helpers::write_metadata(bucket, backup_path, metadata).await {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                warn!(
-                    attempt,
-                    max_attempts = METADATA_WRITE_ATTEMPTS,
-                    error = %e,
-                    "Failed to write backup metadata"
-                );
-                last_err = Some(e);
-                if attempt < METADATA_WRITE_ATTEMPTS {
-                    tokio::time::sleep(METADATA_WRITE_RETRY_DELAY).await;
-                }
-            }
-        }
-    }
-
-    Err(last_err.expect("at least one attempt was made"))
 }
 
 #[cfg(test)]

@@ -6,12 +6,14 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use super::{BackupEvent, Notifier};
 use crate::error::ClickVaultError;
+use crate::retry::RetryPolicy;
 
 pub struct WebhookNotifier {
     url: String,
     method: Method,
     headers: HeaderMap,
     client: reqwest::Client,
+    retry: RetryPolicy,
 }
 
 impl WebhookNotifier {
@@ -20,6 +22,7 @@ impl WebhookNotifier {
         method: String,
         headers: HashMap<String, String>,
         client: reqwest::Client,
+        retry: RetryPolicy,
     ) -> Self {
         let method = method.parse::<Method>().unwrap_or(Method::POST);
 
@@ -35,6 +38,7 @@ impl WebhookNotifier {
             method,
             headers: header_map,
             client,
+            retry,
         }
     }
 }
@@ -42,23 +46,11 @@ impl WebhookNotifier {
 #[async_trait]
 impl Notifier for WebhookNotifier {
     async fn send(&self, event: &BackupEvent) -> Result<(), ClickVaultError> {
-        let response = self
+        let request = self
             .client
             .request(self.method.clone(), &self.url)
             .headers(self.headers.clone())
-            .json(event)
-            .send()
-            .await
-            .map_err(|e| ClickVaultError::Notification(format!("Webhook request failed: {e}")))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(ClickVaultError::Notification(format!(
-                "Webhook returned {status}: {body}"
-            )));
-        }
-
-        Ok(())
+            .json(event);
+        super::send_with_retry(&self.retry, request, "Webhook").await
     }
 }

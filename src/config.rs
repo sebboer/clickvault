@@ -5,6 +5,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::error::ClickVaultError;
+use crate::retry::RetryPolicy;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -12,9 +13,44 @@ pub struct Config {
     pub s3: S3Config,
     #[serde(default)]
     pub backup: BackupConfig,
+    #[serde(default)]
+    pub retry: RetryConfig,
     pub schedule: ScheduleConfig,
     pub retention: RetentionConfig,
     pub notifications: Option<NotificationConfig>,
+}
+
+/// Retry tuning for S3 operations, idempotent ClickHouse reads, and
+/// notification sends. The whole section and every key are optional.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct RetryConfig {
+    /// Total attempts per operation (1 = no retry).
+    pub attempts: u32,
+    /// First backoff; doubles per attempt with full jitter.
+    pub base_delay_ms: u64,
+    /// Ceiling for a single backoff sleep.
+    pub max_delay_ms: u64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            attempts: 3,
+            base_delay_ms: 200,
+            max_delay_ms: 5_000,
+        }
+    }
+}
+
+impl RetryConfig {
+    pub fn policy(&self) -> RetryPolicy {
+        RetryPolicy {
+            attempts: self.attempts,
+            base_delay: Duration::from_millis(self.base_delay_ms),
+            max_delay: Duration::from_millis(self.max_delay_ms),
+        }
+    }
 }
 
 /// Tuning for backup execution. The whole section and every key are optional.
@@ -223,6 +259,16 @@ impl Config {
                 "backup.timeout_secs must be >= backup.poll_interval_secs".into(),
             ));
         }
+        if self.retry.attempts == 0 {
+            return Err(ClickVaultError::Config(
+                "retry.attempts must be >= 1".into(),
+            ));
+        }
+        if self.retry.base_delay_ms == 0 || self.retry.base_delay_ms > self.retry.max_delay_ms {
+            return Err(ClickVaultError::Config(
+                "retry.base_delay_ms must be > 0 and <= retry.max_delay_ms".into(),
+            ));
+        }
         if self.schedule.full_backup_interval_days == 0 {
             return Err(ClickVaultError::Config(
                 "schedule.full_backup_interval_days must be > 0".into(),
@@ -327,6 +373,38 @@ mod tests {
         );
         let cfg = parse(&toml_str);
         assert!(cfg.retention.auto_cleanup);
+    }
+
+    #[test]
+    fn retry_section_defaults_and_overrides() {
+        let cfg = parse(VALID);
+        assert_eq!(cfg.retry.attempts, 3);
+        assert_eq!(cfg.retry.base_delay_ms, 200);
+        assert_eq!(cfg.retry.max_delay_ms, 5_000);
+        let policy = cfg.retry.policy();
+        assert_eq!(policy.attempts, 3);
+        assert_eq!(policy.base_delay, Duration::from_millis(200));
+
+        let toml_str = format!("{VALID}\n[retry]\nattempts = 5\n");
+        let cfg = parse(&toml_str);
+        assert_eq!(cfg.retry.attempts, 5);
+        assert_eq!(cfg.retry.max_delay_ms, 5_000);
+    }
+
+    #[test]
+    fn validation_rejects_bad_retry_tuning() {
+        let mut cfg = parse(VALID);
+        cfg.retry.attempts = 0;
+        assert!(cfg.validate().is_err());
+
+        let mut cfg = parse(VALID);
+        cfg.retry.base_delay_ms = 0;
+        assert!(cfg.validate().is_err());
+
+        let mut cfg = parse(VALID);
+        cfg.retry.base_delay_ms = 10_000;
+        cfg.retry.max_delay_ms = 5_000;
+        assert!(cfg.validate().is_err());
     }
 
     #[test]

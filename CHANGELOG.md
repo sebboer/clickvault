@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Bounded retry with exponential backoff and jitter, tunable via an optional
+  `[retry]` config section (default 3 attempts): S3 operations, idempotent
+  ClickHouse reads (progress polling, in-progress check, status listing), and
+  notification sends. Notification retries cover connect/timeout errors and
+  408/429/5xx responses; other 4xx fail immediately. The `BACKUP` submit is
+  never retried (not idempotent). rust-s3's built-in blind retry — which
+  retried every error including 404s — is disabled in favor of this
+  selective layer.
 - Metadata sidecars now carry a schema `version` field for forward
   compatibility (older sidecars deserialize as version 0; sidecars from a
   newer clickvault log a warning instead of being skipped) and record the

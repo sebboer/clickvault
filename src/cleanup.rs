@@ -41,10 +41,12 @@ pub async fn cleanup(
     config: &Config,
     dry_run: bool,
 ) -> Result<CleanupReport, ClickVaultError> {
+    let retry = config.retry.policy();
+
     // Strict discovery: a backup whose metadata exists but cannot be read
     // would silently shift the retention window, so cleanup refuses to run
     // on an incomplete view.
-    let chains = discovery::discover_chains_strict(bucket, &config.s3.prefix).await?;
+    let chains = discovery::discover_chains_strict(bucket, &config.s3.prefix, &retry).await?;
     let keep = config.retention.keep_full_backups as usize;
 
     // Chains are sorted newest-first. Keep the first `keep` chains, delete the rest.
@@ -80,7 +82,7 @@ pub async fn cleanup(
         let mut chain_failures = 0u64;
         for (incr_path, incr_meta) in chain.incrementals.iter().rev() {
             info!(path = %incr_path, timestamp = %incr_meta.timestamp, "Deleting incremental backup");
-            match s3_helpers::delete_prefix(bucket, incr_path).await {
+            match s3_helpers::delete_prefix(bucket, incr_path, &retry).await {
                 Ok(outcome) => {
                     report.objects_deleted += outcome.deleted;
                     chain_failures += outcome.failed;
@@ -104,7 +106,7 @@ pub async fn cleanup(
         }
 
         info!(path = %chain.full_path, timestamp = %chain.full.timestamp, "Deleting full backup");
-        match s3_helpers::delete_prefix(bucket, &chain.full_path).await {
+        match s3_helpers::delete_prefix(bucket, &chain.full_path, &retry).await {
             Ok(outcome) => {
                 report.objects_deleted += outcome.deleted;
                 if outcome.is_complete() {

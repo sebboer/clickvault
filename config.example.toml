@@ -22,6 +22,13 @@ region = "eu-central-1"
 # poll_interval_secs = 5      # seconds between system.backups progress polls
 # timeout_secs = 86400        # give up on a backup after this long (24h)
 
+# Retry tuning for S3 operations, ClickHouse status reads, and notification
+# sends (optional; defaults shown). Exponential backoff with jitter.
+# [retry]
+# attempts = 3                # total attempts per operation (1 = no retry)
+# base_delay_ms = 200         # first backoff; doubles per attempt
+# max_delay_ms = 5000         # ceiling for a single backoff sleep
+
 [schedule]
 # Create a full backup every 7 days; incremental backups in between.
 full_backup_interval_days = 7

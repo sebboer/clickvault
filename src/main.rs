@@ -5,6 +5,7 @@ mod cli;
 mod config;
 mod error;
 mod notify;
+mod retry;
 mod s3;
 
 use clap::Parser;
@@ -31,11 +32,13 @@ async fn main() -> anyhow::Result<()> {
 
     let ch_client = build_clickhouse_client(&config);
 
+    let retry_policy = config.retry.policy();
+
     // Build notifiers (if configured)
     let notifiers = config
         .notifications
         .as_ref()
-        .map(notify::build_notifiers)
+        .map(|nc| notify::build_notifiers(nc, retry_policy.clone()))
         .unwrap_or_default();
 
     match cli.command {
@@ -131,7 +134,9 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Command::List { full_only } => {
-            let chains = backup::discovery::discover_chains(&bucket, &config.s3.prefix).await?;
+            let chains =
+                backup::discovery::discover_chains(&bucket, &config.s3.prefix, &retry_policy)
+                    .await?;
 
             if chains.is_empty() {
                 println!("No backups found.");
@@ -156,7 +161,8 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Command::Status => {
-            let statuses = backup::progress::get_recent_backups(&ch_client, 10).await?;
+            let statuses =
+                backup::progress::get_recent_backups(&ch_client, 10, &retry_policy).await?;
 
             if statuses.is_empty() {
                 println!("No backup records found in system.backups.");
@@ -178,7 +184,9 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Command::Check { max_age, json } => {
-            let chains = backup::discovery::discover_chains(&bucket, &config.s3.prefix).await?;
+            let chains =
+                backup::discovery::discover_chains(&bucket, &config.s3.prefix, &retry_policy)
+                    .await?;
             let report = check::evaluate(&chains, chrono::Utc::now(), max_age);
 
             if json {

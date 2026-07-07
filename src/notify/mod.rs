@@ -10,6 +10,7 @@ use serde::Serialize;
 use crate::backup::BackupKind;
 use crate::config::{NotificationConfig, NotificationProvider};
 use crate::error::ClickVaultError;
+use crate::retry::{self, RetryPolicy};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -75,7 +76,61 @@ pub trait Notifier: Send + Sync {
     async fn send(&self, event: &BackupEvent) -> Result<(), ClickVaultError>;
 }
 
-pub fn build_notifiers(config: &NotificationConfig) -> Vec<Box<dyn Notifier>> {
+/// One notification send attempt, classified so the retry layer can tell
+/// transient failures from definitive ones.
+enum SendError {
+    Transport(reqwest::Error),
+    Status(reqwest::StatusCode, String),
+    NotCloneable,
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SendError::Transport(e) => write!(f, "request failed: {e}"),
+            SendError::Status(status, body) => write!(f, "returned {status}: {body}"),
+            SendError::NotCloneable => write!(f, "request body cannot be cloned for retry"),
+        }
+    }
+}
+
+fn is_transient_send(e: &SendError) -> bool {
+    match e {
+        SendError::Transport(e) => e.is_connect() || e.is_timeout(),
+        SendError::Status(status, _) => {
+            matches!(status.as_u16(), 408 | 429) || status.is_server_error()
+        }
+        SendError::NotCloneable => false,
+    }
+}
+
+/// Sends an HTTP request, retrying transient failures (connect/timeout
+/// errors and 408/429/5xx responses) per the policy. Other non-2xx
+/// responses fail immediately — a misconfigured endpoint won't heal.
+pub(crate) async fn send_with_retry(
+    policy: &RetryPolicy,
+    request: reqwest::RequestBuilder,
+    provider: &str,
+) -> Result<(), ClickVaultError> {
+    retry::with_retry(policy, provider, is_transient_send, || {
+        let attempt = request.try_clone();
+        async move {
+            let request = attempt.ok_or(SendError::NotCloneable)?;
+            let response = request.send().await.map_err(SendError::Transport)?;
+            let status = response.status();
+            if status.is_success() {
+                Ok(())
+            } else {
+                let body = response.text().await.unwrap_or_default();
+                Err(SendError::Status(status, body))
+            }
+        }
+    })
+    .await
+    .map_err(|e| ClickVaultError::Notification(format!("{provider} {e}")))
+}
+
+pub fn build_notifiers(config: &NotificationConfig, retry: RetryPolicy) -> Vec<Box<dyn Notifier>> {
     let client = reqwest::Client::new();
     let mut notifiers: Vec<Box<dyn Notifier>> = Vec::new();
 
@@ -85,6 +140,7 @@ pub fn build_notifiers(config: &NotificationConfig) -> Vec<Box<dyn Notifier>> {
                 notifiers.push(Box::new(slack::SlackNotifier::new(
                     webhook_url.clone(),
                     client.clone(),
+                    retry.clone(),
                 )));
             }
             NotificationProvider::Webhook {
@@ -97,6 +153,7 @@ pub fn build_notifiers(config: &NotificationConfig) -> Vec<Box<dyn Notifier>> {
                     method.clone(),
                     headers.clone(),
                     client.clone(),
+                    retry.clone(),
                 )));
             }
         }
@@ -167,6 +224,20 @@ mod tests {
         assert!(!should_send(&cfg(false, true), &completed()));
         assert!(should_send(&cfg(true, true), &failed()));
         assert!(!should_send(&cfg(true, false), &failed()));
+    }
+
+    #[test]
+    fn send_errors_classify_transient_vs_definitive() {
+        let status = |code: u16| {
+            SendError::Status(reqwest::StatusCode::from_u16(code).unwrap(), String::new())
+        };
+        assert!(is_transient_send(&status(500)));
+        assert!(is_transient_send(&status(503)));
+        assert!(is_transient_send(&status(429)));
+        assert!(is_transient_send(&status(408)));
+        assert!(!is_transient_send(&status(404)));
+        assert!(!is_transient_send(&status(400)));
+        assert!(!is_transient_send(&SendError::NotCloneable));
     }
 
     #[test]

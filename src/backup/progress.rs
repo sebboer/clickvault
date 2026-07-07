@@ -6,6 +6,7 @@ use serde::Deserialize;
 use tracing::{info, warn};
 
 use crate::error::ClickVaultError;
+use crate::retry::{self, RetryPolicy};
 
 /// Column list shared by every SELECT that reads system.backups into a
 /// [`BackupStatus`]. Order must match the struct's field order (RowBinary
@@ -20,6 +21,16 @@ pub const BACKUP_STATUS_COLUMNS: &str = "id, toString(status) AS status, \
      toUnixTimestamp(system.backups.start_time) AS start_ts, \
      toUnixTimestamp(system.backups.end_time) AS end_ts, \
      total_size, ifNull(error, '') AS error";
+
+/// Whether a ClickHouse error is a transport-level blip worth retrying.
+/// Everything else (server exceptions, parse errors, RowNotFound) is a
+/// definitive answer.
+pub(crate) fn is_transient_clickhouse(e: &clickhouse::error::Error) -> bool {
+    matches!(
+        e,
+        clickhouse::error::Error::Network(_) | clickhouse::error::Error::TimedOut
+    )
+}
 
 #[derive(Debug, Clone, Deserialize, clickhouse::Row)]
 pub struct BackupStatus {
@@ -94,6 +105,7 @@ pub async fn poll_until_complete(
     backup_id: &str,
     poll_interval: Duration,
     timeout: Duration,
+    retry: &RetryPolicy,
 ) -> Result<BackupStatus, ClickVaultError> {
     let start = std::time::Instant::now();
     let mut missing_polls = 0u32;
@@ -110,7 +122,7 @@ pub async fn poll_until_complete(
             });
         }
 
-        let Some(status) = get_backup_status(client, backup_id).await? else {
+        let Some(status) = get_backup_status(client, backup_id, retry).await? else {
             missing_polls += 1;
             warn!(
                 backup_id,
@@ -178,14 +190,21 @@ pub async fn poll_until_complete(
 async fn get_backup_status(
     client: &Client,
     backup_id: &str,
+    retry: &RetryPolicy,
 ) -> Result<Option<BackupStatus>, ClickVaultError> {
-    let status = client
-        .query(&format!(
-            "SELECT {BACKUP_STATUS_COLUMNS} FROM system.backups WHERE id = ?"
-        ))
-        .bind(backup_id)
-        .fetch_optional::<BackupStatus>()
-        .await?;
+    let sql = format!("SELECT {BACKUP_STATUS_COLUMNS} FROM system.backups WHERE id = ?");
+    let status = retry::with_retry(
+        retry,
+        "system.backups poll",
+        is_transient_clickhouse,
+        || {
+            client
+                .query(&sql)
+                .bind(backup_id)
+                .fetch_optional::<BackupStatus>()
+        },
+    )
+    .await?;
 
     Ok(status)
 }
@@ -194,15 +213,19 @@ async fn get_backup_status(
 pub async fn get_recent_backups(
     client: &Client,
     limit: u32,
+    retry: &RetryPolicy,
 ) -> Result<Vec<BackupStatus>, ClickVaultError> {
-    let statuses = client
-        .query(&format!(
-            "SELECT {BACKUP_STATUS_COLUMNS} FROM system.backups \
-             ORDER BY start_time DESC LIMIT ?"
-        ))
-        .bind(limit)
-        .fetch_all::<BackupStatus>()
-        .await?;
+    let sql = format!(
+        "SELECT {BACKUP_STATUS_COLUMNS} FROM system.backups \
+         ORDER BY start_time DESC LIMIT ?"
+    );
+    let statuses = retry::with_retry(
+        retry,
+        "system.backups status",
+        is_transient_clickhouse,
+        || client.query(&sql).bind(limit).fetch_all::<BackupStatus>(),
+    )
+    .await?;
 
     Ok(statuses)
 }

@@ -3,17 +3,20 @@ use serde_json::json;
 
 use super::{BackupEvent, Notifier};
 use crate::error::ClickVaultError;
+use crate::retry::RetryPolicy;
 
 pub struct SlackNotifier {
     webhook_url: String,
     client: reqwest::Client,
+    retry: RetryPolicy,
 }
 
 impl SlackNotifier {
-    pub fn new(webhook_url: String, client: reqwest::Client) -> Self {
+    pub fn new(webhook_url: String, client: reqwest::Client, retry: RetryPolicy) -> Self {
         Self {
             webhook_url,
             client,
+            retry,
         }
     }
 
@@ -74,23 +77,7 @@ impl SlackNotifier {
 impl Notifier for SlackNotifier {
     async fn send(&self, event: &BackupEvent) -> Result<(), ClickVaultError> {
         let payload = self.format_message(event);
-
-        let response = self
-            .client
-            .post(&self.webhook_url)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| ClickVaultError::Notification(format!("Slack request failed: {e}")))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(ClickVaultError::Notification(format!(
-                "Slack webhook returned {status}: {body}"
-            )));
-        }
-
-        Ok(())
+        let request = self.client.post(&self.webhook_url).json(&payload);
+        super::send_with_retry(&self.retry, request, "Slack webhook").await
     }
 }
