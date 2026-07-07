@@ -100,9 +100,31 @@ pub async fn run_backup(
 
     info!(backup_id = %backup_id, "Backup started, polling for progress");
 
-    // Poll until complete
-    let status =
-        progress::poll_until_complete(client, &backup_id, POLL_INTERVAL, BACKUP_TIMEOUT).await?;
+    // Poll until complete. If the backup's row vanished from system.backups
+    // (server restart), the backup is no longer running and its data — which
+    // has no metadata sidecar yet — would be a permanently invisible orphan,
+    // so it is rolled back like a metadata-write failure. On TIMEOUT the
+    // backup may still be running server-side, so its data is left alone.
+    let status = match progress::poll_until_complete(
+        client,
+        &backup_id,
+        POLL_INTERVAL,
+        BACKUP_TIMEOUT,
+    )
+    .await
+    {
+        Ok(status) => status,
+        Err(e @ ClickVaultError::BackupStateLost { .. }) => {
+            error!(
+                backup_id = %backup_id,
+                error = %e,
+                "Backup state lost; rolling back orphaned backup data"
+            );
+            rollback_orphaned_backup(bucket, &backup_path).await;
+            return Err(e);
+        }
+        Err(e) => return Err(e),
+    };
 
     let duration = start.elapsed();
 
@@ -135,22 +157,7 @@ pub async fn run_backup(
             error = %e,
             "Failed to write backup metadata after retries; rolling back orphaned backup data"
         );
-        match s3_helpers::delete_prefix(bucket, &backup_path).await {
-            Ok(outcome) if outcome.is_complete() => {
-                info!(path = %backup_path, objects = outcome.deleted, "Rolled back orphaned backup data")
-            }
-            Ok(outcome) => error!(
-                path = %backup_path,
-                deleted = outcome.deleted,
-                failed = outcome.failed,
-                "Partially rolled back orphaned backup data; manual cleanup required"
-            ),
-            Err(ce) => error!(
-                path = %backup_path,
-                error = %ce,
-                "Failed to roll back orphaned backup data; manual cleanup required"
-            ),
-        }
+        rollback_orphaned_backup(bucket, &backup_path).await;
         return Err(e);
     }
 
@@ -163,6 +170,28 @@ pub async fn run_backup(
     );
 
     Ok(BackupResult { metadata, duration })
+}
+
+/// Deletes backup data that will never get a metadata sidecar: without one
+/// the backup is invisible to discovery, so it could never be listed,
+/// cleaned up, or chained off.
+async fn rollback_orphaned_backup(bucket: &Bucket, backup_path: &str) {
+    match s3_helpers::delete_prefix(bucket, backup_path).await {
+        Ok(outcome) if outcome.is_complete() => {
+            info!(path = %backup_path, objects = outcome.deleted, "Rolled back orphaned backup data")
+        }
+        Ok(outcome) => error!(
+            path = %backup_path,
+            deleted = outcome.deleted,
+            failed = outcome.failed,
+            "Partially rolled back orphaned backup data; manual cleanup required"
+        ),
+        Err(ce) => error!(
+            path = %backup_path,
+            error = %ce,
+            "Failed to roll back orphaned backup data; manual cleanup required"
+        ),
+    }
 }
 
 async fn check_no_backup_in_progress(client: &Client) -> Result<(), ClickVaultError> {

@@ -29,6 +29,12 @@ pub enum ClickVaultError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[error(
+        "backup {id} disappeared from system.backups after {polls} consecutive polls \
+         (was the ClickHouse server restarted?)"
+    )]
+    BackupStateLost { id: String, polls: u32 },
+
     #[error("cannot verify backup at {path}: {source}")]
     MetadataUnavailable {
         path: String,
