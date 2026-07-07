@@ -136,7 +136,15 @@ pub async fn run_backup(
             "Failed to write backup metadata after retries; rolling back orphaned backup data"
         );
         match s3_helpers::delete_prefix(bucket, &backup_path).await {
-            Ok(n) => info!(path = %backup_path, objects = n, "Rolled back orphaned backup data"),
+            Ok(outcome) if outcome.is_complete() => {
+                info!(path = %backup_path, objects = outcome.deleted, "Rolled back orphaned backup data")
+            }
+            Ok(outcome) => error!(
+                path = %backup_path,
+                deleted = outcome.deleted,
+                failed = outcome.failed,
+                "Partially rolled back orphaned backup data; manual cleanup required"
+            ),
             Err(ce) => error!(
                 path = %backup_path,
                 error = %ce,

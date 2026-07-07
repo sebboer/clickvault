@@ -3,55 +3,52 @@ use s3::Bucket;
 use tracing::{debug, warn};
 
 use super::{BackupChain, BackupMetadata};
-use crate::error::ClickVaultError;
+use crate::error::{ClickVaultError, MetadataReadError};
 use crate::s3 as s3_helpers;
 
-/// Lists all full backups found in S3. Returns (path, metadata) pairs sorted by timestamp.
-pub async fn list_full_backups(
-    bucket: &Bucket,
-    prefix: &str,
-) -> Result<Vec<(String, BackupMetadata)>, ClickVaultError> {
-    let full_prefix = if prefix.is_empty() {
-        "full/".to_string()
-    } else {
-        format!("{prefix}/full/")
-    };
-
-    let dirs = s3_helpers::list_prefixes(bucket, &full_prefix).await?;
-    let mut backups = Vec::new();
-
-    for dir in dirs {
-        match s3_helpers::read_metadata(bucket, &dir).await {
-            Ok(meta) => backups.push((dir, meta)),
-            Err(e) => {
-                warn!("Skipping full backup at {dir} (unreadable metadata, possible orphan): {e}");
-            }
-        }
-    }
-
-    backups.sort_by_key(|(_, meta)| meta.timestamp);
-    Ok(backups)
+/// How discovery reacts to metadata sidecars it cannot read.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MetadataPolicy {
+    /// Skip backups with unreadable metadata, logging a warning. Suitable for
+    /// listing and for deciding the next backup.
+    Lenient,
+    /// Fail when a sidecar exists but cannot be read or parsed. Used by
+    /// cleanup: deletion decisions must never be computed from an incomplete
+    /// view of the bucket. Missing sidecars are still skipped — those backups
+    /// were never visible to discovery in the first place.
+    Strict,
 }
 
-/// Lists all incremental backups found in S3. Returns (path, metadata) pairs sorted by timestamp.
-pub async fn list_incremental_backups(
-    bucket: &Bucket,
-    prefix: &str,
-) -> Result<Vec<(String, BackupMetadata)>, ClickVaultError> {
-    let incr_prefix = if prefix.is_empty() {
-        "incremental/".to_string()
+/// Builds the S3 directory prefix for a backup kind segment ("full"/"incremental").
+fn segment_prefix(prefix: &str, segment: &str) -> String {
+    if prefix.is_empty() {
+        format!("{segment}/")
     } else {
-        format!("{prefix}/incremental/")
-    };
+        format!("{prefix}/{segment}/")
+    }
+}
 
-    let dirs = s3_helpers::list_prefixes(bucket, &incr_prefix).await?;
+/// Lists the backups under a directory prefix. Returns (path, metadata) pairs
+/// sorted by timestamp.
+async fn list_backups(
+    bucket: &Bucket,
+    dir_prefix: &str,
+    policy: MetadataPolicy,
+) -> Result<Vec<(String, BackupMetadata)>, ClickVaultError> {
+    let dirs = s3_helpers::list_prefixes(bucket, dir_prefix).await?;
     let mut backups = Vec::new();
 
     for dir in dirs {
         match s3_helpers::read_metadata(bucket, &dir).await {
             Ok(meta) => backups.push((dir, meta)),
+            Err(MetadataReadError::Missing) => {
+                warn!("Skipping backup at {dir} (no metadata sidecar, possible orphan)");
+            }
+            Err(source) if policy == MetadataPolicy::Strict => {
+                return Err(ClickVaultError::MetadataUnavailable { path: dir, source });
+            }
             Err(e) => {
-                warn!("Skipping incremental at {dir} (unreadable metadata, possible orphan): {e}");
+                warn!("Skipping backup at {dir} (unreadable metadata): {e}");
             }
         }
     }
@@ -61,13 +58,32 @@ pub async fn list_incremental_backups(
 }
 
 /// Discovers all backup chains by grouping incrementals under their full backup.
-/// Chains are sorted newest-first.
+/// Chains are sorted newest-first. Backups with unreadable metadata are
+/// skipped with a warning.
 pub async fn discover_chains(
     bucket: &Bucket,
     prefix: &str,
 ) -> Result<Vec<BackupChain>, ClickVaultError> {
-    let fulls = list_full_backups(bucket, prefix).await?;
-    let incrementals = list_incremental_backups(bucket, prefix).await?;
+    discover_chains_with(bucket, prefix, MetadataPolicy::Lenient).await
+}
+
+/// Like [`discover_chains`], but fails instead of skipping when a sidecar
+/// exists and cannot be read or parsed, so callers that delete backups never
+/// act on an incomplete view.
+pub async fn discover_chains_strict(
+    bucket: &Bucket,
+    prefix: &str,
+) -> Result<Vec<BackupChain>, ClickVaultError> {
+    discover_chains_with(bucket, prefix, MetadataPolicy::Strict).await
+}
+
+async fn discover_chains_with(
+    bucket: &Bucket,
+    prefix: &str,
+    policy: MetadataPolicy,
+) -> Result<Vec<BackupChain>, ClickVaultError> {
+    let fulls = list_backups(bucket, &segment_prefix(prefix, "full"), policy).await?;
+    let incrementals = list_backups(bucket, &segment_prefix(prefix, "incremental"), policy).await?;
 
     Ok(group_chains(fulls, incrementals))
 }

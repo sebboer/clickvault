@@ -156,6 +156,15 @@ async fn main() -> anyhow::Result<()> {
                     };
                     notify::dispatch(notif_config, &notifiers, &event).await;
                 }
+
+                if report.has_failures() {
+                    anyhow::bail!(
+                        "cleanup incomplete: {} chain(s) could not be fully deleted \
+                         ({} object(s) failed); rerun cleanup to retry",
+                        report.chains_failed,
+                        report.objects_failed
+                    );
+                }
             }
         }
     }

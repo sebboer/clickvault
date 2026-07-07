@@ -7,10 +7,21 @@ use crate::config::Config;
 use crate::error::ClickVaultError;
 use crate::s3 as s3_helpers;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct CleanupReport {
     pub chains_deleted: usize,
+    /// Chains selected for deletion that could not be fully removed.
+    pub chains_failed: usize,
     pub objects_deleted: u64,
+    /// Objects that could not be deleted. When listing a prefix fails, the
+    /// object count is unknown and counted as one failure.
+    pub objects_failed: u64,
+}
+
+impl CleanupReport {
+    pub fn has_failures(&self) -> bool {
+        self.chains_failed > 0 || self.objects_failed > 0
+    }
 }
 
 /// Selects which chains should be deleted, keeping the `keep` newest.
@@ -30,7 +41,10 @@ pub async fn cleanup(
     config: &Config,
     dry_run: bool,
 ) -> Result<CleanupReport, ClickVaultError> {
-    let chains = discovery::discover_chains(bucket, &config.s3.prefix).await?;
+    // Strict discovery: a backup whose metadata exists but cannot be read
+    // would silently shift the retention window, so cleanup refuses to run
+    // on an incomplete view.
+    let chains = discovery::discover_chains_strict(bucket, &config.s3.prefix).await?;
     let keep = config.retention.keep_full_backups as usize;
 
     // Chains are sorted newest-first. Keep the first `keep` chains, delete the rest.
@@ -41,14 +55,10 @@ pub async fn cleanup(
             total_chains = chains.len(),
             keep, "No backup chains to clean up"
         );
-        return Ok(CleanupReport {
-            chains_deleted: 0,
-            objects_deleted: 0,
-        });
+        return Ok(CleanupReport::default());
     }
 
-    let mut total_chains_deleted = 0usize;
-    let mut total_objects_deleted = 0u64;
+    let mut report = CleanupReport::default();
 
     for chain in to_delete {
         info!(
@@ -60,39 +70,63 @@ pub async fn cleanup(
         );
 
         if dry_run {
-            total_chains_deleted += 1;
+            report.chains_deleted += 1;
             continue;
         }
 
-        // Delete incrementals first (newest to oldest)
+        // Delete incrementals first (newest to oldest). The full backup is
+        // only removed once every incremental is gone, so an interrupted run
+        // leaves an intact, discoverable chain that the next cleanup retries.
+        let mut chain_failures = 0u64;
         for (incr_path, incr_meta) in chain.incrementals.iter().rev() {
             info!(path = %incr_path, timestamp = %incr_meta.timestamp, "Deleting incremental backup");
             match s3_helpers::delete_prefix(bucket, incr_path).await {
-                Ok(count) => total_objects_deleted += count,
+                Ok(outcome) => {
+                    report.objects_deleted += outcome.deleted;
+                    chain_failures += outcome.failed;
+                }
                 Err(e) => {
-                    warn!(path = %incr_path, error = %e, "Failed to delete incremental backup")
+                    warn!(path = %incr_path, error = %e, "Failed to delete incremental backup");
+                    chain_failures += 1;
                 }
             }
         }
 
-        // Delete the full backup
-        info!(path = %chain.full_path, timestamp = %chain.full.timestamp, "Deleting full backup");
-        match s3_helpers::delete_prefix(bucket, &chain.full_path).await {
-            Ok(count) => total_objects_deleted += count,
-            Err(e) => warn!(path = %chain.full_path, error = %e, "Failed to delete full backup"),
+        if chain_failures > 0 {
+            warn!(
+                full_backup = %chain.full_path,
+                failed_objects = chain_failures,
+                "Keeping full backup: its incrementals could not be fully deleted; rerun cleanup to retry"
+            );
+            report.objects_failed += chain_failures;
+            report.chains_failed += 1;
+            continue;
         }
 
-        total_chains_deleted += 1;
+        info!(path = %chain.full_path, timestamp = %chain.full.timestamp, "Deleting full backup");
+        match s3_helpers::delete_prefix(bucket, &chain.full_path).await {
+            Ok(outcome) => {
+                report.objects_deleted += outcome.deleted;
+                if outcome.is_complete() {
+                    report.chains_deleted += 1;
+                } else {
+                    report.objects_failed += outcome.failed;
+                    report.chains_failed += 1;
+                }
+            }
+            Err(e) => {
+                warn!(path = %chain.full_path, error = %e, "Failed to delete full backup");
+                report.objects_failed += 1;
+                report.chains_failed += 1;
+            }
+        }
     }
-
-    let report = CleanupReport {
-        chains_deleted: total_chains_deleted,
-        objects_deleted: total_objects_deleted,
-    };
 
     info!(
         chains_deleted = report.chains_deleted,
+        chains_failed = report.chains_failed,
         objects_deleted = report.objects_deleted,
+        objects_failed = report.objects_failed,
         "Cleanup complete"
     );
 
@@ -145,5 +179,24 @@ mod tests {
     #[test]
     fn empty_input_is_safe() {
         assert!(select_chains_for_deletion(&[], 3).is_empty());
+    }
+
+    #[test]
+    fn report_has_failures_when_chains_or_objects_failed() {
+        assert!(!CleanupReport::default().has_failures());
+        assert!(
+            CleanupReport {
+                chains_failed: 1,
+                ..Default::default()
+            }
+            .has_failures()
+        );
+        assert!(
+            CleanupReport {
+                objects_failed: 2,
+                ..Default::default()
+            }
+            .has_failures()
+        );
     }
 }

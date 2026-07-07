@@ -1,10 +1,12 @@
 use chrono::{DateTime, Utc};
 use s3::creds::Credentials;
+use s3::error::S3Error;
 use s3::{Bucket, Region};
+use tracing::warn;
 
 use crate::backup::BackupMetadata;
 use crate::config::S3Config;
-use crate::error::ClickVaultError;
+use crate::error::{ClickVaultError, MetadataReadError};
 
 const METADATA_FILENAME: &str = ".clickvault_meta.json";
 
@@ -98,15 +100,25 @@ pub async fn write_metadata(
     Ok(())
 }
 
+/// Classifies a `get_object` failure on a metadata sidecar: a 404 means the
+/// sidecar does not exist (orphan), anything else is a possibly-transient
+/// read failure.
+fn classify_read_error(e: S3Error) -> MetadataReadError {
+    match e {
+        S3Error::HttpFailWithBody(404, _) => MetadataReadError::Missing,
+        other => MetadataReadError::Unreadable(other),
+    }
+}
+
 pub async fn read_metadata(
     bucket: &Bucket,
     backup_path: &str,
-) -> Result<BackupMetadata, ClickVaultError> {
+) -> Result<BackupMetadata, MetadataReadError> {
     let path = metadata_path(backup_path);
     let response = bucket
         .get_object(&path)
         .await
-        .map_err(ClickVaultError::S3)?;
+        .map_err(classify_read_error)?;
     let meta: BackupMetadata = serde_json::from_slice(response.as_slice())?;
     Ok(meta)
 }
@@ -142,26 +154,73 @@ pub async fn list_prefixes(bucket: &Bucket, prefix: &str) -> Result<Vec<String>,
     Ok(prefixes)
 }
 
-/// Deletes all objects under a given prefix. Returns the count of deleted objects.
-pub async fn delete_prefix(bucket: &Bucket, prefix: &str) -> Result<u64, ClickVaultError> {
-    let mut deleted = 0u64;
+/// Result of deleting the objects under a prefix.
+#[derive(Debug, Default)]
+pub struct DeleteOutcome {
+    pub deleted: u64,
+    /// Objects that could not be deleted, plus the metadata sidecar when it
+    /// was deliberately kept because data objects failed to delete.
+    pub failed: u64,
+}
 
+impl DeleteOutcome {
+    pub fn is_complete(&self) -> bool {
+        self.failed == 0
+    }
+}
+
+/// Splits keys into (data objects, metadata sidecar) so the sidecar can be
+/// deleted last: if deletion is interrupted, the backup stays visible to
+/// discovery and the next cleanup run can retry it.
+fn split_sidecar_last(keys: Vec<String>, sidecar: &str) -> (Vec<String>, Vec<String>) {
+    keys.into_iter().partition(|key| key != sidecar)
+}
+
+async fn delete_keys(bucket: &Bucket, keys: &[String], outcome: &mut DeleteOutcome) {
+    for key in keys {
+        match bucket.delete_object(key).await {
+            Ok(_) => outcome.deleted += 1,
+            Err(e) => {
+                warn!(key = %key, error = %e, "Failed to delete object");
+                outcome.failed += 1;
+            }
+        }
+    }
+}
+
+/// Deletes all objects under a given prefix, continuing past individual
+/// failures. The metadata sidecar is deleted last, and only if every data
+/// object was deleted, so a partially-deleted backup remains discoverable.
+pub async fn delete_prefix(
+    bucket: &Bucket,
+    prefix: &str,
+) -> Result<DeleteOutcome, ClickVaultError> {
     let results = bucket
         .list(prefix.to_string(), None)
         .await
         .map_err(ClickVaultError::S3)?;
 
-    for result in &results {
-        for object in &result.contents {
-            bucket
-                .delete_object(&object.key)
-                .await
-                .map_err(ClickVaultError::S3)?;
-            deleted += 1;
-        }
+    let keys: Vec<String> = results
+        .iter()
+        .flat_map(|result| result.contents.iter().map(|object| object.key.clone()))
+        .collect();
+    let (data_keys, sidecar_keys) = split_sidecar_last(keys, &metadata_path(prefix));
+
+    let mut outcome = DeleteOutcome::default();
+    delete_keys(bucket, &data_keys, &mut outcome).await;
+
+    if outcome.failed == 0 {
+        delete_keys(bucket, &sidecar_keys, &mut outcome).await;
+    } else if !sidecar_keys.is_empty() {
+        warn!(
+            prefix = %prefix,
+            failed = outcome.failed,
+            "Keeping metadata sidecar so the backup stays discoverable; rerun cleanup to retry"
+        );
+        outcome.failed += sidecar_keys.len() as u64;
     }
 
-    Ok(deleted)
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -255,6 +314,53 @@ mod tests {
         assert!(
             frag.contains("http://rustfs:9000/my-bucket/p/"),
             "got: {frag}"
+        );
+    }
+
+    #[test]
+    fn classify_read_error_treats_404_as_missing() {
+        let missing = classify_read_error(S3Error::HttpFailWithBody(404, String::new()));
+        assert!(matches!(missing, MetadataReadError::Missing));
+
+        let denied = classify_read_error(S3Error::HttpFailWithBody(403, String::new()));
+        assert!(matches!(denied, MetadataReadError::Unreadable(_)));
+
+        let server_error = classify_read_error(S3Error::HttpFailWithBody(500, String::new()));
+        assert!(matches!(server_error, MetadataReadError::Unreadable(_)));
+    }
+
+    #[test]
+    fn split_sidecar_last_separates_metadata_from_data() {
+        let prefix = "backups/full/20260102T030405000Z/";
+        let sidecar = metadata_path(prefix);
+        let keys = vec![
+            format!("{prefix}data/part1"),
+            sidecar.clone(),
+            format!("{prefix}data/part2"),
+        ];
+        let (data, sidecars) = split_sidecar_last(keys, &sidecar);
+        assert_eq!(
+            data,
+            vec![format!("{prefix}data/part1"), format!("{prefix}data/part2")]
+        );
+        assert_eq!(sidecars, vec![sidecar]);
+    }
+
+    #[test]
+    fn delete_outcome_is_complete_only_without_failures() {
+        assert!(
+            DeleteOutcome {
+                deleted: 3,
+                failed: 0
+            }
+            .is_complete()
+        );
+        assert!(
+            !DeleteOutcome {
+                deleted: 3,
+                failed: 1
+            }
+            .is_complete()
         );
     }
 
