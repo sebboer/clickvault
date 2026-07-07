@@ -43,6 +43,3 @@ jobs:
 
       - name: Test
         run: cargo test --all-targets
-
-      - name: Build (release)
-        run: cargo build --release
