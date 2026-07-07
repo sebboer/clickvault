@@ -7,7 +7,7 @@ use tracing::{error, info, warn};
 
 use super::discovery;
 use super::progress;
-use super::{BackupKind, BackupMetadata};
+use super::{BackupChain, BackupKind, BackupMetadata};
 use crate::config::Config;
 use crate::error::ClickVaultError;
 use crate::s3 as s3_helpers;
@@ -37,50 +37,108 @@ pub struct BackupResult {
     pub duration: Duration,
 }
 
+/// A failed backup run, carrying the kind the run decided on (if it got far
+/// enough to decide) so failure notifications report what was actually
+/// attempted rather than what the CLI flag implied.
+#[derive(Debug, thiserror::Error)]
+#[error("{source}")]
+pub struct BackupRunError {
+    pub kind: Option<BackupKind>,
+    #[source]
+    pub source: ClickVaultError,
+}
+
+/// Decides whether this run performs a full or an incremental backup. A run
+/// is promoted to full when forced via `--full` or when the configured
+/// interval since the last full backup has elapsed.
+fn decide_kind(
+    force_full: bool,
+    latest_full: Option<&BackupMetadata>,
+    interval_days: u32,
+) -> BackupKind {
+    if force_full || discovery::should_do_full_backup(latest_full, interval_days) {
+        BackupKind::Full
+    } else {
+        BackupKind::Incremental
+    }
+}
+
 pub async fn run_backup(
     client: &Client,
     bucket: &Bucket,
     config: &Config,
     force_full: bool,
     skip_in_progress_check: bool,
-) -> Result<BackupResult, ClickVaultError> {
+) -> Result<BackupResult, BackupRunError> {
+    let undecided = |source| BackupRunError { kind: None, source };
+
     if !skip_in_progress_check {
-        check_no_backup_in_progress(client).await?;
+        check_no_backup_in_progress(client)
+            .await
+            .map_err(undecided)?;
     }
 
-    let prefix = &config.s3.prefix;
-    let db = quote_ident(&config.clickhouse.database);
-
     // Discover existing backups to decide full vs incremental
-    let chains = discovery::discover_chains(bucket, prefix).await?;
+    let chains = discovery::discover_chains(bucket, &config.s3.prefix)
+        .await
+        .map_err(undecided)?;
     let latest_full = chains.first().map(|c| &c.full);
 
-    let do_full = force_full
-        || discovery::should_do_full_backup(latest_full, config.schedule.full_backup_interval_days);
+    let kind = decide_kind(
+        force_full,
+        latest_full,
+        config.schedule.full_backup_interval_days,
+    );
+
+    execute_backup(client, bucket, config, kind, &chains)
+        .await
+        .map_err(|source| BackupRunError {
+            kind: Some(kind),
+            source,
+        })
+}
+
+async fn execute_backup(
+    client: &Client,
+    bucket: &Bucket,
+    config: &Config,
+    kind: BackupKind,
+    chains: &[BackupChain],
+) -> Result<BackupResult, ClickVaultError> {
+    let prefix = &config.s3.prefix;
+    let db = quote_ident(&config.clickhouse.database);
 
     let now = Utc::now();
     let start = Instant::now();
 
-    let (kind, backup_path, sql) = if do_full {
-        let path = s3_helpers::full_backup_path(prefix, &now);
-        let dest = s3_helpers::s3_sql_fragment(&config.s3, &path);
-        let sql = format!("BACKUP DATABASE {db} TO {dest} ASYNC");
-        (BackupKind::Full, path, sql)
+    // Deep chaining: incrementals base on the latest backup (full or
+    // incremental) of the newest chain. Computed once so the SQL and the
+    // metadata sidecar can never disagree about the base.
+    let base_path = if kind == BackupKind::Incremental {
+        Some(
+            chains
+                .first()
+                .map(|chain| chain.latest().0.to_string())
+                .ok_or(ClickVaultError::NoBaseBackup)?,
+        )
     } else {
-        // Deep chaining: base on the latest backup (full or incremental)
-        let latest = chains
-            .first()
-            .map(|chain| {
-                let (path, _meta) = chain.latest();
-                path.to_string()
-            })
-            .ok_or(ClickVaultError::NoBaseBackup)?;
+        None
+    };
 
-        let path = s3_helpers::incremental_backup_path(prefix, &now);
-        let dest = s3_helpers::s3_sql_fragment(&config.s3, &path);
-        let base = s3_helpers::s3_sql_fragment(&config.s3, &latest);
-        let sql = format!("BACKUP DATABASE {db} TO {dest} SETTINGS base_backup = {base} ASYNC");
-        (BackupKind::Incremental, path, sql)
+    let (backup_path, sql) = match &base_path {
+        None => {
+            let path = s3_helpers::full_backup_path(prefix, &now);
+            let dest = s3_helpers::s3_sql_fragment(&config.s3, &path);
+            let sql = format!("BACKUP DATABASE {db} TO {dest} ASYNC");
+            (path, sql)
+        }
+        Some(latest) => {
+            let path = s3_helpers::incremental_backup_path(prefix, &now);
+            let dest = s3_helpers::s3_sql_fragment(&config.s3, &path);
+            let base = s3_helpers::s3_sql_fragment(&config.s3, latest);
+            let sql = format!("BACKUP DATABASE {db} TO {dest} SETTINGS base_backup = {base} ASYNC");
+            (path, sql)
+        }
     };
 
     info!(kind = %kind, path = %backup_path, "Starting backup");
@@ -127,16 +185,6 @@ pub async fn run_backup(
     };
 
     let duration = start.elapsed();
-
-    // Write metadata to S3
-    let base_path = if kind == BackupKind::Incremental {
-        chains.first().map(|chain| {
-            let (path, _) = chain.latest();
-            path.to_string()
-        })
-    } else {
-        None
-    };
 
     let metadata = BackupMetadata {
         backup_id: backup_id.clone(),
@@ -239,4 +287,58 @@ async fn write_metadata_with_retry(
     }
 
     Err(last_err.expect("at least one attempt was made"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration as ChronoDuration;
+
+    fn full_backup(age_days: i64) -> BackupMetadata {
+        BackupMetadata {
+            backup_id: "id".into(),
+            kind: BackupKind::Full,
+            timestamp: Utc::now() - ChronoDuration::days(age_days),
+            base_backup_path: None,
+            status: "BACKUP_CREATED".into(),
+            total_size: 0,
+            database: "db".into(),
+        }
+    }
+
+    #[test]
+    fn decide_kind_full_when_forced_or_no_backups() {
+        assert_eq!(
+            decide_kind(true, Some(&full_backup(1)), 7),
+            BackupKind::Full
+        );
+        assert_eq!(decide_kind(false, None, 7), BackupKind::Full);
+    }
+
+    #[test]
+    fn decide_kind_incremental_within_interval() {
+        assert_eq!(
+            decide_kind(false, Some(&full_backup(1)), 7),
+            BackupKind::Incremental
+        );
+    }
+
+    #[test]
+    fn decide_kind_promotes_to_full_after_interval() {
+        // The scenario behind the notification-kind bug: no --full flag, but
+        // the elapsed interval promotes the run to a full backup.
+        assert_eq!(
+            decide_kind(false, Some(&full_backup(8)), 7),
+            BackupKind::Full
+        );
+    }
+
+    #[test]
+    fn backup_run_error_displays_as_its_source() {
+        let err = BackupRunError {
+            kind: Some(BackupKind::Full),
+            source: ClickVaultError::NoBaseBackup,
+        };
+        assert_eq!(err.to_string(), ClickVaultError::NoBaseBackup.to_string());
+    }
 }

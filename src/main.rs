@@ -39,12 +39,6 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Backup { full, force } => {
-            let kind = if full {
-                BackupKind::Full
-            } else {
-                BackupKind::Incremental
-            };
-
             match backup::executor::run_backup(&ch_client, &bucket, &config, full, force).await {
                 Ok(result) => {
                     info!(
@@ -74,6 +68,15 @@ async fn main() -> anyhow::Result<()> {
                 Err(e) => {
                     error!(error = %e, "Backup failed");
 
+                    // Prefer the kind the run actually decided on (a scheduled
+                    // run may auto-promote to full); fall back to the
+                    // flag-implied kind when the run failed before deciding.
+                    let kind = e.kind.unwrap_or(if full {
+                        BackupKind::Full
+                    } else {
+                        BackupKind::Incremental
+                    });
+
                     if let Some(notif_config) = &config.notifications {
                         let event = BackupEvent::backup_failed(
                             kind,
@@ -83,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
                         notify::dispatch(notif_config, &notifiers, &event).await;
                     }
 
-                    return Err(e.into());
+                    return Err(e.source.into());
                 }
             }
         }
