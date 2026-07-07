@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -9,9 +10,41 @@ use crate::error::ClickVaultError;
 pub struct Config {
     pub clickhouse: ClickHouseConfig,
     pub s3: S3Config,
+    #[serde(default)]
+    pub backup: BackupConfig,
     pub schedule: ScheduleConfig,
     pub retention: RetentionConfig,
     pub notifications: Option<NotificationConfig>,
+}
+
+/// Tuning for backup execution. The whole section and every key are optional.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct BackupConfig {
+    /// Seconds between polls of system.backups while a backup is running.
+    pub poll_interval_secs: u64,
+    /// Overall time budget for a single backup before failing with TIMEOUT.
+    /// Large databases can legitimately need more than the 24h default.
+    pub timeout_secs: u64,
+}
+
+impl Default for BackupConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_secs: 5,
+            timeout_secs: 86_400, // 24 hours
+        }
+    }
+}
+
+impl BackupConfig {
+    pub fn poll_interval(&self) -> Duration {
+        Duration::from_secs(self.poll_interval_secs)
+    }
+
+    pub fn timeout(&self) -> Duration {
+        Duration::from_secs(self.timeout_secs)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,6 +209,16 @@ impl Config {
                 "s3.region must not be empty".into(),
             ));
         }
+        if self.backup.poll_interval_secs == 0 {
+            return Err(ClickVaultError::Config(
+                "backup.poll_interval_secs must be > 0".into(),
+            ));
+        }
+        if self.backup.timeout_secs < self.backup.poll_interval_secs {
+            return Err(ClickVaultError::Config(
+                "backup.timeout_secs must be >= backup.poll_interval_secs".into(),
+            ));
+        }
         if self.schedule.full_backup_interval_days == 0 {
             return Err(ClickVaultError::Config(
                 "schedule.full_backup_interval_days must be > 0".into(),
@@ -259,6 +302,36 @@ mod tests {
 
         let mut cfg = parse(VALID);
         cfg.retention.keep_full_backups = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn backup_section_defaults_when_absent() {
+        let cfg = parse(VALID);
+        assert_eq!(cfg.backup.poll_interval_secs, 5);
+        assert_eq!(cfg.backup.timeout_secs, 86_400);
+        assert_eq!(cfg.backup.poll_interval(), Duration::from_secs(5));
+        assert_eq!(cfg.backup.timeout(), Duration::from_secs(86_400));
+    }
+
+    #[test]
+    fn backup_section_overrides_and_partial_defaults() {
+        let toml_str = format!("{VALID}\n[backup]\npoll_interval_secs = 2\n");
+        let cfg = parse(&toml_str);
+        assert_eq!(cfg.backup.poll_interval_secs, 2);
+        // Unspecified key keeps its default.
+        assert_eq!(cfg.backup.timeout_secs, 86_400);
+    }
+
+    #[test]
+    fn validation_rejects_bad_backup_tuning() {
+        let mut cfg = parse(VALID);
+        cfg.backup.poll_interval_secs = 0;
+        assert!(cfg.validate().is_err());
+
+        let mut cfg = parse(VALID);
+        cfg.backup.poll_interval_secs = 10;
+        cfg.backup.timeout_secs = 5;
         assert!(cfg.validate().is_err());
     }
 

@@ -113,6 +113,13 @@ ClickVault uses a TOML configuration file. See [config.example.toml](config.exam
 | `access_key` | no       | S3 access key                               |
 | `secret_key` | no       | S3 secret key                               |
 
+#### `[backup]`
+
+| Key                  | Required | Description                                                        |
+| -------------------- | -------- | ------------------------------------------------------------------ |
+| `poll_interval_secs` | no       | Seconds between backup progress polls (default: `5`)               |
+| `timeout_secs`       | no       | Give up on a backup after this many seconds (default: `86400`/24h) |
+
 #### `[schedule]`
 
 | Key                         | Required | Description                           |

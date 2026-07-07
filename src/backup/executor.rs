@@ -12,8 +12,6 @@ use crate::config::Config;
 use crate::error::ClickVaultError;
 use crate::s3 as s3_helpers;
 
-const POLL_INTERVAL: Duration = Duration::from_secs(5);
-const BACKUP_TIMEOUT: Duration = Duration::from_secs(86400); // 24 hours
 const METADATA_WRITE_ATTEMPTS: usize = 3;
 const METADATA_WRITE_RETRY_DELAY: Duration = Duration::from_secs(2);
 
@@ -166,8 +164,8 @@ async fn execute_backup(
     let status = match progress::poll_until_complete(
         client,
         &backup_id,
-        POLL_INTERVAL,
-        BACKUP_TIMEOUT,
+        config.backup.poll_interval(),
+        config.backup.timeout(),
     )
     .await
     {
