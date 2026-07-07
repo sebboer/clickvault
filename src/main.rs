@@ -21,8 +21,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(&cli.log_level)),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level)),
         )
         .init();
 
@@ -90,8 +89,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Command::List { full_only } => {
-            let chains =
-                backup::discovery::discover_chains(&bucket, &config.s3.prefix).await?;
+            let chains = backup::discovery::discover_chains(&bucket, &config.s3.prefix).await?;
 
             if chains.is_empty() {
                 println!("No backups found.");
@@ -101,10 +99,7 @@ async fn main() -> anyhow::Result<()> {
             for chain in &chains {
                 println!(
                     "FULL  {} | {} | {} bytes | {}",
-                    chain.full_path,
-                    chain.full.timestamp,
-                    chain.full.total_size,
-                    chain.full.status
+                    chain.full_path, chain.full.timestamp, chain.full.total_size, chain.full.status
                 );
 
                 if !full_only {
@@ -119,8 +114,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Command::Status => {
-            let statuses =
-                backup::progress::get_recent_backups(&ch_client, 10).await?;
+            let statuses = backup::progress::get_recent_backups(&ch_client, 10).await?;
 
             if statuses.is_empty() {
                 println!("No backup records found in system.backups.");

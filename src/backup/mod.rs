@@ -51,3 +51,69 @@ impl BackupChain {
             .unwrap_or((&self.full_path, &self.full))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn md(kind: BackupKind) -> BackupMetadata {
+        BackupMetadata {
+            backup_id: "id".into(),
+            kind,
+            timestamp: Utc::now(),
+            base_backup_path: None,
+            status: "BACKUP_CREATED".into(),
+            total_size: 42,
+            database: "db".into(),
+        }
+    }
+
+    #[test]
+    fn backup_kind_display() {
+        assert_eq!(BackupKind::Full.to_string(), "full");
+        assert_eq!(BackupKind::Incremental.to_string(), "incremental");
+    }
+
+    #[test]
+    fn backup_kind_serde_roundtrip() {
+        assert_eq!(
+            serde_json::to_string(&BackupKind::Full).unwrap(),
+            "\"full\""
+        );
+        let kind: BackupKind = serde_json::from_str("\"incremental\"").unwrap();
+        assert_eq!(kind, BackupKind::Incremental);
+    }
+
+    #[test]
+    fn chain_latest_returns_full_when_no_incrementals() {
+        let chain = BackupChain {
+            full_path: "full/f1/".into(),
+            full: md(BackupKind::Full),
+            incrementals: vec![],
+        };
+        assert_eq!(chain.latest().0, "full/f1/");
+    }
+
+    #[test]
+    fn chain_latest_returns_last_incremental() {
+        let chain = BackupChain {
+            full_path: "full/f1/".into(),
+            full: md(BackupKind::Full),
+            incrementals: vec![
+                ("incremental/i1/".into(), md(BackupKind::Incremental)),
+                ("incremental/i2/".into(), md(BackupKind::Incremental)),
+            ],
+        };
+        assert_eq!(chain.latest().0, "incremental/i2/");
+    }
+
+    #[test]
+    fn backup_metadata_json_roundtrip() {
+        let meta = md(BackupKind::Incremental);
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: BackupMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kind, BackupKind::Incremental);
+        assert_eq!(back.total_size, 42);
+        assert_eq!(back.database, "db");
+    }
+}

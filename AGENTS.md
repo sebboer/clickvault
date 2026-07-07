@@ -89,14 +89,26 @@ notify/* -> config.rs (provider config)
 
 ## Testing
 
-No test suite exists yet. To test manually, you need:
-- A running ClickHouse instance with a database
-- S3-compatible storage (RustFS works for local testing)
-- A `config.toml` pointing to both
+Unit tests cover the pure logic (no ClickHouse/S3 required): chain grouping and
+deep-chain tracing (`backup/discovery.rs`), retention selection (`cleanup.rs`),
+S3 path/SQL-fragment building and escaping (`s3.rs`), notification
+filtering/serialization (`notify/mod.rs`), and config validation (`config.rs`).
+
+```bash
+cargo test              # run the unit test suite
+cargo fmt --all --check # formatting
+cargo clippy --all-targets -- -D warnings
+```
+
+CI (`.github/workflows/ci.yml`) runs fmt, clippy, tests, and a release build on
+every push to `main` and every pull request.
+
+For end-to-end testing against a real stack, use `hack/docker-compose.yml`
+(ClickHouse + RustFS) and run the CLI against `hack/config.toml`.
 
 ## Areas Not Yet Implemented
 
 - Restore subcommand (out of scope for v1)
-- Unit/integration tests
+- Integration tests against a live ClickHouse + S3 stack (only unit tests exist)
 - S3 batch delete (currently deletes objects one by one)
 - Backup of multiple databases or individual tables (currently single database only)

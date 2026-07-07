@@ -55,8 +55,8 @@ pub async fn run_backup(
     let chains = discovery::discover_chains(bucket, prefix).await?;
     let latest_full = chains.first().map(|c| &c.full);
 
-    let do_full =
-        force_full || discovery::should_do_full_backup(latest_full, config.schedule.full_backup_interval_days);
+    let do_full = force_full
+        || discovery::should_do_full_backup(latest_full, config.schedule.full_backup_interval_days);
 
     let now = Utc::now();
     let start = Instant::now();
@@ -101,7 +101,8 @@ pub async fn run_backup(
     info!(backup_id = %backup_id, "Backup started, polling for progress");
 
     // Poll until complete
-    let status = progress::poll_until_complete(client, &backup_id, POLL_INTERVAL, BACKUP_TIMEOUT).await?;
+    let status =
+        progress::poll_until_complete(client, &backup_id, POLL_INTERVAL, BACKUP_TIMEOUT).await?;
 
     let duration = start.elapsed();
 

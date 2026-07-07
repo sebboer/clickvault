@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::Method;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use super::{BackupEvent, Notifier};
 use crate::error::ClickVaultError;
@@ -21,16 +21,11 @@ impl WebhookNotifier {
         headers: HashMap<String, String>,
         client: reqwest::Client,
     ) -> Self {
-        let method = method
-            .parse::<Method>()
-            .unwrap_or(Method::POST);
+        let method = method.parse::<Method>().unwrap_or(Method::POST);
 
         let mut header_map = HeaderMap::new();
         for (key, value) in &headers {
-            if let (Ok(name), Ok(val)) = (
-                key.parse::<HeaderName>(),
-                HeaderValue::from_str(value),
-            ) {
+            if let (Ok(name), Ok(val)) = (key.parse::<HeaderName>(), HeaderValue::from_str(value)) {
                 header_map.insert(name, val);
             }
         }
