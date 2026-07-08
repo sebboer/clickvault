@@ -174,8 +174,27 @@ fn default_method() -> String {
     "POST".to_string()
 }
 
+/// Endpoint URLs must carry an explicit scheme (a bare `host:port` fails
+/// with an opaque client error only at first use) and no trailing slash
+/// (which would produce double slashes in derived URLs and SQL fragments).
+fn validate_endpoint_url(value: &str, field: &str) -> Result<(), ClickVaultError> {
+    if !(value.starts_with("http://") || value.starts_with("https://")) {
+        return Err(ClickVaultError::Config(format!(
+            "{field} must start with http:// or https:// (got '{value}')"
+        )));
+    }
+    if value.ends_with('/') {
+        return Err(ClickVaultError::Config(format!(
+            "{field} must not end with '/' (got '{value}')"
+        )));
+    }
+    Ok(())
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self, ClickVaultError> {
+        // Deliberately a blocking read: this runs once at startup for a
+        // small file, before any concurrent work exists.
         let contents = std::fs::read_to_string(path).map_err(|e| {
             ClickVaultError::Config(format!(
                 "Failed to read config file {}: {e}",
@@ -234,20 +253,29 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), ClickVaultError> {
-        if self.clickhouse.url.is_empty() {
-            return Err(ClickVaultError::Config(
-                "clickhouse.url must not be empty".into(),
-            ));
-        }
+        validate_endpoint_url(&self.clickhouse.url, "clickhouse.url")?;
         if self.clickhouse.database.is_empty() {
             return Err(ClickVaultError::Config(
                 "clickhouse.database must not be empty".into(),
             ));
         }
+        validate_endpoint_url(&self.s3.endpoint, "s3.endpoint")?;
+        if let Some(endpoint) = &self.s3.clickhouse_endpoint {
+            validate_endpoint_url(endpoint, "s3.clickhouse_endpoint")?;
+        }
         if self.s3.bucket.is_empty() {
             return Err(ClickVaultError::Config(
                 "s3.bucket must not be empty".into(),
             ));
+        }
+        // Path builders join the prefix with '/' themselves; a slash here
+        // would silently split the S3 keyspace (e.g. "backups//full/...").
+        if self.s3.prefix.starts_with('/') || self.s3.prefix.ends_with('/') {
+            return Err(ClickVaultError::Config(format!(
+                "s3.prefix must not start or end with '/' (got '{}'); \
+                 path segments are joined automatically",
+                self.s3.prefix
+            )));
         }
         if self.s3.region.is_empty() {
             return Err(ClickVaultError::Config(
@@ -370,6 +398,55 @@ mod tests {
     fn example_config_parses_and_validates() {
         let cfg: Config =
             toml::from_str(include_str!("../config.example.toml")).expect("example parses");
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validation_rejects_malformed_endpoint_urls() {
+        // Missing scheme: fails at load time instead of an opaque client
+        // error at first use.
+        let mut cfg = parse(VALID);
+        cfg.clickhouse.url = "localhost:8123".into();
+        assert!(cfg.validate().is_err());
+
+        let mut cfg = parse(VALID);
+        cfg.s3.endpoint = "s3.example.com".into();
+        assert!(cfg.validate().is_err());
+
+        // Trailing slash would yield double slashes in derived URLs/SQL.
+        let mut cfg = parse(VALID);
+        cfg.s3.endpoint = "https://s3.example.com/".into();
+        assert!(cfg.validate().is_err());
+
+        let mut cfg = parse(VALID);
+        cfg.s3.clickhouse_endpoint = Some("rustfs:9000".into());
+        assert!(cfg.validate().is_err());
+
+        // Well-formed override passes.
+        let mut cfg = parse(VALID);
+        cfg.s3.clickhouse_endpoint = Some("http://rustfs:9000".into());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validation_rejects_prefix_with_leading_or_trailing_slash() {
+        // A slash in the prefix silently splits the S3 keyspace
+        // ("backups//full/..." vs "backups/full/...").
+        let mut cfg = parse(VALID);
+        cfg.s3.prefix = "backups/".into();
+        assert!(cfg.validate().is_err());
+
+        let mut cfg = parse(VALID);
+        cfg.s3.prefix = "/backups".into();
+        assert!(cfg.validate().is_err());
+
+        // Interior slashes are legitimate nesting; empty stays allowed.
+        let mut cfg = parse(VALID);
+        cfg.s3.prefix = "team/clickhouse-backups".into();
+        assert!(cfg.validate().is_ok());
+
+        let mut cfg = parse(VALID);
+        cfg.s3.prefix = String::new();
         assert!(cfg.validate().is_ok());
     }
 

@@ -53,6 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Stricter config validation at load time: `clickhouse.url`, `s3.endpoint`,
+  and `s3.clickhouse_endpoint` must carry an `http(s)://` scheme and no
+  trailing slash; `s3.prefix` must not start or end with `/` (a slash would
+  silently split the S3 keyspace into `prefix//full/...`).
 - Cleanup deletes S3 objects via the batch `DeleteObjects` API (up to 1000
   keys per request) instead of one request per object, with per-key errors
   from the batch response feeding the existing partial-failure accounting.
