@@ -170,8 +170,15 @@ async fn execute_backup(
     // status) directly, so we read it from the result rather than guessing the
     // most recent row in system.backups (which races with concurrent activity).
     // Never retried: submitting BACKUP is not idempotent -- a retry after an
-    // ambiguous failure could start a second backup.
-    let submitted = client.query(&sql).fetch_one::<BackupSubmit>().await?;
+    // ambiguous failure could start a second backup. Bounded generously so a
+    // hung server fails the run instead of stalling it forever; ASYNC means
+    // the server only has to return the backup id, not run the backup.
+    let submitted = tokio::time::timeout(
+        Duration::from_secs(60),
+        client.query(&sql).fetch_one::<BackupSubmit>(),
+    )
+    .await
+    .map_err(|_| ClickVaultError::ClickHouse(clickhouse::error::Error::TimedOut))??;
     let backup_id = submitted.id;
 
     if backup_id.is_empty() {
@@ -296,7 +303,7 @@ async fn check_no_backup_in_progress(
         retry,
         "in-progress check",
         progress::is_transient_clickhouse,
-        || client.query(&sql).bind(&pattern).fetch_all(),
+        || progress::with_query_timeout(client.query(&sql).bind(&pattern).fetch_all()),
     )
     .await?;
 

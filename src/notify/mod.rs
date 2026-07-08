@@ -131,7 +131,15 @@ pub(crate) async fn send_with_retry(
 }
 
 pub fn build_notifiers(config: &NotificationConfig, retry: RetryPolicy) -> Vec<Box<dyn Notifier>> {
-    let client = reqwest::Client::new();
+    // reqwest has no default timeouts; without these a hung webhook endpoint
+    // would stall the run indefinitely.
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()
+        // Only fails if the TLS backend cannot initialize -- the same
+        // condition Client::new() panics on.
+        .expect("failed to build HTTP client");
     let mut notifiers: Vec<Box<dyn Notifier>> = Vec::new();
 
     for provider in &config.providers {

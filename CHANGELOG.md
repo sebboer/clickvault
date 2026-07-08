@@ -67,6 +67,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- All HTTP clients now have explicit timeouts, so a peer that accepts
+  connections but never responds fails the run (and triggers retries)
+  instead of stalling it forever: S3 management requests 60s (rust-s3's
+  advertised 60s default is never actually applied by `Bucket::new` -- the
+  struct field is set but the HTTP client is built without it), ClickHouse
+  status queries 30s, the BACKUP submit 60s, notification sends 10s
+  connect / 30s total.
 - The in-progress backup guard is scoped to this tool's bucket/prefix (via
   the destination recorded in `system.backups.name`), so backups of other
   databases or from other tools on a shared ClickHouse server no longer

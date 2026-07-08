@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -21,6 +22,22 @@ pub const BACKUP_STATUS_COLUMNS: &str = "id, toString(status) AS status, \
      toUnixTimestamp(system.backups.start_time) AS start_ts, \
      toUnixTimestamp(system.backups.end_time) AS end_ts, \
      total_size, ifNull(error, '') AS error";
+
+/// Upper bound for a single system.backups query. The clickhouse crate's
+/// HTTP client has no request timeout, so a hung server would otherwise
+/// stall a poll (and the whole run) indefinitely.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bounds a ClickHouse query future, mapping expiry to `Error::TimedOut` --
+/// which `is_transient_clickhouse` already classifies as retryable.
+pub(crate) async fn with_query_timeout<T>(
+    fut: impl Future<Output = Result<T, clickhouse::error::Error>>,
+) -> Result<T, clickhouse::error::Error> {
+    match tokio::time::timeout(QUERY_TIMEOUT, fut).await {
+        Ok(result) => result,
+        Err(_) => Err(clickhouse::error::Error::TimedOut),
+    }
+}
 
 /// Whether a ClickHouse error is a transport-level blip worth retrying.
 /// Everything else (server exceptions, parse errors, RowNotFound) is a
@@ -198,10 +215,12 @@ async fn get_backup_status(
         "system.backups poll",
         is_transient_clickhouse,
         || {
-            client
-                .query(&sql)
-                .bind(backup_id)
-                .fetch_optional::<BackupStatus>()
+            with_query_timeout(
+                client
+                    .query(&sql)
+                    .bind(backup_id)
+                    .fetch_optional::<BackupStatus>(),
+            )
         },
     )
     .await?;
@@ -223,7 +242,7 @@ pub async fn get_recent_backups(
         retry,
         "system.backups status",
         is_transient_clickhouse,
-        || client.query(&sql).bind(limit).fetch_all::<BackupStatus>(),
+        || with_query_timeout(client.query(&sql).bind(limit).fetch_all::<BackupStatus>()),
     )
     .await?;
 

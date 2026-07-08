@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use chrono::{DateTime, Utc};
 use s3::creds::Credentials;
 use s3::error::S3Error;
@@ -11,6 +13,14 @@ use crate::error::{ClickVaultError, MetadataReadError};
 use crate::retry::{self, RetryPolicy};
 
 const METADATA_FILENAME: &str = ".clickvault_meta.json";
+
+/// Upper bound for a single S3 management request (listings, sidecar
+/// reads/writes, batch deletes -- backup data transfer happens inside
+/// ClickHouse, not here). Must be set explicitly: rust-s3 0.37's
+/// `Bucket::new` stores a 60s default in a struct field but builds its HTTP
+/// client from `ClientOptions::default()`, which has NO timeout -- verified
+/// live, a hung endpoint stalled requests indefinitely.
+const S3_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Whether an S3 error is worth retrying: transport-level failures and
 /// throttling/server-side HTTP statuses. Other 4xx (403, 404, ...) are
@@ -51,6 +61,12 @@ pub fn build_bucket(config: &S3Config) -> Result<Box<Bucket>, ClickVaultError> {
     if config.path_style {
         bucket = bucket.with_path_style();
     }
+
+    // Applied last: this is what actually rebuilds the HTTP client with a
+    // timeout (see S3_REQUEST_TIMEOUT).
+    let bucket = bucket
+        .with_request_timeout(S3_REQUEST_TIMEOUT)
+        .map_err(|e| ClickVaultError::Config(format!("Failed to set S3 request timeout: {e}")))?;
 
     Ok(bucket)
 }
