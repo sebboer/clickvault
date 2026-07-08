@@ -141,10 +141,11 @@ ClickVault uses a TOML configuration file. See [config.example.toml](config.exam
 
 #### `[retention]`
 
-| Key                 | Required | Description                                                            |
-| ------------------- | -------- | ---------------------------------------------------------------------- |
-| `keep_full_backups` | yes      | Number of full backup chains to retain (minimum `1`)                   |
-| `auto_cleanup`      | no       | Run cleanup after each successful backup (default: `false`)            |
+| Key                 | Required | Description                                                                             |
+| ------------------- | -------- | ---------------------------------------------------------------------------------------- |
+| `keep_full_backups` | yes      | Number of full backup chains to retain (minimum `1`)                                     |
+| `keep_days`         | no       | Never delete a chain whose newest backup is younger than this many days (default: unset) |
+| `auto_cleanup`      | no       | Run cleanup after each successful backup (default: `false`)                              |
 
 #### `[notifications]`
 
@@ -279,6 +280,8 @@ The metadata sidecar file tracks a schema version, backup kind, submission times
 ### Retention
 
 Cleanup operates on entire chains. With `keep_full_backups = 4`, the 4 most recent full backups and all their incrementals are kept. Older chains are deleted (incrementals first, then the full).
+
+With `keep_days` set, a chain is only deleted when it exceeds **both** bounds: beyond the `keep_full_backups` newest chains *and* its newest backup (the latest restore point the chain provides, full or incremental) older than `keep_days`. This protects the covered time window when extra full backups are created in a burst — without it, three `backup --full` runs would push a month of history out of a `keep_full_backups = 4` window.
 
 ### Cron Setup Example
 

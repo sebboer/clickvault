@@ -130,6 +130,11 @@ pub struct ScheduleConfig {
 #[derive(Debug, Deserialize)]
 pub struct RetentionConfig {
     pub keep_full_backups: u32,
+    /// Optional: never delete a chain whose newest backup is younger than
+    /// this many days, even when it is beyond `keep_full_backups`. Guards
+    /// the covered time window against bursts of forced full backups.
+    #[serde(default)]
+    pub keep_days: Option<u32>,
     /// Run cleanup automatically after each successful backup, so retention
     /// is enforced without a separate cleanup cron entry.
     #[serde(default)]
@@ -279,6 +284,12 @@ impl Config {
                 "retention.keep_full_backups must be > 0".into(),
             ));
         }
+        if self.retention.keep_days == Some(0) {
+            return Err(ClickVaultError::Config(
+                "retention.keep_days must be > 0 when set (omit it for count-only retention)"
+                    .into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -360,6 +371,23 @@ mod tests {
         let cfg: Config =
             toml::from_str(include_str!("../config.example.toml")).expect("example parses");
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn keep_days_defaults_none_parses_and_rejects_zero() {
+        let cfg = parse(VALID);
+        assert_eq!(cfg.retention.keep_days, None);
+
+        let toml_str = VALID.replace(
+            "keep_full_backups = 4",
+            "keep_full_backups = 4\nkeep_days = 30",
+        );
+        let cfg = parse(&toml_str);
+        assert_eq!(cfg.retention.keep_days, Some(30));
+
+        let mut cfg = parse(VALID);
+        cfg.retention.keep_days = Some(0);
+        assert!(cfg.validate().is_err());
     }
 
     #[test]

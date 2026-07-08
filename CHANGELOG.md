@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optional `[backup]` config section: `poll_interval_secs` (default 5) and
   `timeout_secs` (default 86400) replace the previously hardcoded progress
   polling constants.
+- `retention.keep_days` (optional): age-based retention alongside the count
+  bound — a chain is deleted only when it is beyond `keep_full_backups` *and*
+  its newest backup (latest restore point, full or incremental) is older than
+  `keep_days`. Protects the covered time window against bursts of forced full
+  backups.
 - `retention.auto_cleanup` (default `false`): run cleanup automatically after
   each successful backup instead of a separate cron entry; auto-cleanup
   problems are logged but never fail the backup run.

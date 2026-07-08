@@ -36,6 +36,9 @@ full_backup_interval_days = 7
 [retention]
 # Keep the last 4 full backup chains (each chain = 1 full + its incrementals).
 keep_full_backups = 4
+# Additionally never delete a chain whose newest backup is younger than this
+# many days, even when it is beyond keep_full_backups.
+# keep_days = 30
 # Run cleanup after each successful backup instead of a separate cron entry.
 # auto_cleanup = false
 

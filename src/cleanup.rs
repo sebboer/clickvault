@@ -1,3 +1,4 @@
+use chrono::{DateTime, Duration, Utc};
 use s3::Bucket;
 use tracing::{info, warn};
 
@@ -24,16 +25,27 @@ impl CleanupReport {
     }
 }
 
-/// Selects which chains should be deleted, keeping the `keep` newest.
+/// Selects which chains should be deleted. A chain must exceed **both**
+/// retention bounds: beyond the `keep` newest chains (count) and — when
+/// `keep_days` is set — its newest backup (the latest restore point it
+/// provides, full or incremental) older than `keep_days`.
 ///
 /// `chains` is expected to be sorted newest-first (as returned by
 /// `discover_chains`). Pure function so the retention math can be tested.
-fn select_chains_for_deletion(chains: &[BackupChain], keep: usize) -> &[BackupChain] {
-    if chains.len() <= keep {
-        &[]
-    } else {
-        &chains[keep..]
-    }
+fn select_chains_for_deletion(
+    chains: &[BackupChain],
+    keep: usize,
+    keep_days: Option<u32>,
+    now: DateTime<Utc>,
+) -> Vec<&BackupChain> {
+    chains
+        .iter()
+        .skip(keep)
+        .filter(|chain| match keep_days {
+            None => true,
+            Some(days) => now - chain.latest().1.timestamp >= Duration::days(days as i64),
+        })
+        .collect()
 }
 
 pub async fn cleanup(
@@ -48,14 +60,16 @@ pub async fn cleanup(
     // on an incomplete view.
     let chains = discovery::discover_chains_strict(bucket, &config.s3.prefix, &retry).await?;
     let keep = config.retention.keep_full_backups as usize;
+    let keep_days = config.retention.keep_days;
 
-    // Chains are sorted newest-first. Keep the first `keep` chains, delete the rest.
-    let to_delete = select_chains_for_deletion(&chains, keep);
+    let to_delete = select_chains_for_deletion(&chains, keep, keep_days, Utc::now());
 
     if to_delete.is_empty() {
         info!(
             total_chains = chains.len(),
-            keep, "No backup chains to clean up"
+            keep,
+            keep_days = keep_days.map(|d| d.to_string()).unwrap_or_default(),
+            "No backup chains to clean up"
         );
         return Ok(CleanupReport::default());
     }
@@ -139,32 +153,57 @@ pub async fn cleanup(
 mod tests {
     use super::*;
     use crate::backup::{BackupKind, BackupMetadata};
-    use chrono::Utc;
+    use chrono::TimeZone;
 
-    fn chain(path: &str) -> BackupChain {
+    fn now() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap()
+    }
+
+    fn md(kind: BackupKind, age_days: i64) -> BackupMetadata {
+        BackupMetadata {
+            version: crate::backup::METADATA_SCHEMA_VERSION,
+            backup_id: "id".into(),
+            kind,
+            timestamp: now() - Duration::days(age_days),
+            base_backup_path: None,
+            status: "BACKUP_CREATED".into(),
+            total_size: 0,
+            database: "db".into(),
+            started_at: None,
+            finished_at: None,
+        }
+    }
+
+    /// A chain whose full is `full_age_days` old, optionally with one
+    /// incremental that is `incr_age_days` old.
+    fn chain_aged(path: &str, full_age_days: i64, incr_age_days: Option<i64>) -> BackupChain {
         BackupChain {
             full_path: path.into(),
-            full: BackupMetadata {
-                version: crate::backup::METADATA_SCHEMA_VERSION,
-                backup_id: "id".into(),
-                kind: BackupKind::Full,
-                timestamp: Utc::now(),
-                base_backup_path: None,
-                status: "BACKUP_CREATED".into(),
-                total_size: 0,
-                database: "db".into(),
-                started_at: None,
-                finished_at: None,
-            },
-            incrementals: vec![],
+            full: md(BackupKind::Full, full_age_days),
+            incrementals: incr_age_days
+                .map(|age| {
+                    vec![(
+                        format!("incremental/of-{path}"),
+                        md(BackupKind::Incremental, age),
+                    )]
+                })
+                .unwrap_or_default(),
         }
+    }
+
+    fn chain(path: &str) -> BackupChain {
+        chain_aged(path, 0, None)
+    }
+
+    fn paths<'a>(selected: &[&'a BackupChain]) -> Vec<&'a str> {
+        selected.iter().map(|c| c.full_path.as_str()).collect()
     }
 
     #[test]
     fn keeps_all_when_fewer_than_or_equal_to_keep() {
         let chains = vec![chain("full/a/"), chain("full/b/"), chain("full/c/")];
-        assert!(select_chains_for_deletion(&chains, 3).is_empty());
-        assert!(select_chains_for_deletion(&chains[..2], 3).is_empty());
+        assert!(select_chains_for_deletion(&chains, 3, None, now()).is_empty());
+        assert!(select_chains_for_deletion(&chains[..2], 3, None, now()).is_empty());
     }
 
     #[test]
@@ -176,14 +215,52 @@ mod tests {
             chain("full/old/"),
             chain("full/oldest/"),
         ];
-        let to_delete = select_chains_for_deletion(&chains, 2);
-        let paths: Vec<&str> = to_delete.iter().map(|c| c.full_path.as_str()).collect();
-        assert_eq!(paths, vec!["full/old/", "full/oldest/"]);
+        let to_delete = select_chains_for_deletion(&chains, 2, None, now());
+        assert_eq!(paths(&to_delete), vec!["full/old/", "full/oldest/"]);
     }
 
     #[test]
     fn empty_input_is_safe() {
-        assert!(select_chains_for_deletion(&[], 3).is_empty());
+        assert!(select_chains_for_deletion(&[], 3, None, now()).is_empty());
+    }
+
+    #[test]
+    fn keep_days_protects_recent_chains_beyond_count() {
+        // The forced-full burst: three extra chains created today. Only the
+        // count bound is exceeded, so keep_days retains them all.
+        let chains = vec![
+            chain_aged("full/d/", 0, None),
+            chain_aged("full/c/", 0, None),
+            chain_aged("full/b/", 0, None),
+            chain_aged("full/a/", 1, None),
+        ];
+        assert!(select_chains_for_deletion(&chains, 1, Some(7), now()).is_empty());
+        // Without keep_days the same fixtures lose three chains.
+        assert_eq!(select_chains_for_deletion(&chains, 1, None, now()).len(), 3);
+    }
+
+    #[test]
+    fn deletes_only_chains_exceeding_both_bounds() {
+        let chains = vec![
+            chain_aged("full/new/", 0, None),
+            chain_aged("full/recent/", 3, None),
+            chain_aged("full/ancient/", 30, None),
+        ];
+        let to_delete = select_chains_for_deletion(&chains, 1, Some(7), now());
+        assert_eq!(paths(&to_delete), vec!["full/ancient/"]);
+    }
+
+    #[test]
+    fn keep_days_measures_the_latest_backup_not_the_full() {
+        // Old full, but its newest incremental still covers recent restore
+        // points -> protected. A fully old chain is not.
+        let chains = vec![
+            chain_aged("full/new/", 0, None),
+            chain_aged("full/covered/", 40, Some(2)),
+            chain_aged("full/stale/", 40, Some(20)),
+        ];
+        let to_delete = select_chains_for_deletion(&chains, 1, Some(7), now());
+        assert_eq!(paths(&to_delete), vec!["full/stale/"]);
     }
 
     #[test]
