@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::{Duration, Utc};
 use s3::Bucket;
 use tracing::{debug, warn};
@@ -99,11 +101,24 @@ async fn discover_chains_with(
     Ok(group_chains(fulls, incrementals))
 }
 
-/// Groups incrementals under their full backups by tracing chain links.
+/// Path comparison key: chain links are stored with a trailing slash but may
+/// be referenced without one.
+fn normalize(path: &str) -> &str {
+    path.trim_end_matches('/')
+}
+
+/// Groups incrementals under their full backups by resolving chain links.
 ///
 /// Pure function (no I/O) so the grouping/sorting logic can be tested directly.
 /// Returned chains are sorted newest-first; incrementals within each chain are
 /// sorted oldest-first.
+///
+/// Resolution is a single map lookup per incremental: a backup's base is
+/// always older than the backup itself (it existed when the backup was
+/// taken), so processing incrementals oldest-first guarantees the base —
+/// full or incremental, arbitrarily deep in the chain — is already resolved.
+/// An incremental whose base cannot be resolved (deleted, cyclic, or itself
+/// orphaned) is dropped as an orphan, matching the previous behavior.
 fn group_chains(
     fulls: Vec<(String, BackupMetadata)>,
     incrementals: Vec<(String, BackupMetadata)>,
@@ -117,86 +132,36 @@ fn group_chains(
         })
         .collect();
 
-    // Process incrementals oldest-first so a parent is always attached before
-    // any child that chains off it (deep-chain tracing only looks at already
-    // attached incrementals).
+    // Normalized backup path -> index of the chain it belongs to.
+    let mut chain_of: HashMap<String, usize> = chains
+        .iter()
+        .enumerate()
+        .map(|(index, chain)| (normalize(&chain.full_path).to_string(), index))
+        .collect();
+
     let mut incrementals = incrementals;
     incrementals.sort_by_key(|(_, meta)| meta.timestamp);
 
-    // For deep chaining, we need to walk the chain links.
-    // Each incremental's base_backup_path points to the previous backup in the chain.
-    // We trace back to find which full backup each incremental belongs to.
     for (incr_path, incr_meta) in incrementals {
-        if let Some(chain) = find_chain_for_incremental(&chains, &incr_path, &incr_meta) {
-            if let Some(c) = chains.iter_mut().find(|c| c.full_path == chain) {
-                c.incrementals.push((incr_path, incr_meta));
+        let index = incr_meta
+            .base_backup_path
+            .as_deref()
+            .and_then(|base| chain_of.get(normalize(base)))
+            .copied();
+
+        match index {
+            Some(index) => {
+                chain_of.insert(normalize(&incr_path).to_string(), index);
+                chains[index].incrementals.push((incr_path, incr_meta));
             }
-        } else {
-            debug!("Orphaned incremental backup: {incr_path}");
+            None => debug!("Orphaned incremental backup: {incr_path}"),
         }
     }
 
-    // Sort incrementals within each chain by timestamp
-    for chain in &mut chains {
-        chain.incrementals.sort_by_key(|(_, meta)| meta.timestamp);
-    }
-
-    // Sort chains newest-first
+    // Incrementals are attached in timestamp order already; chains newest-first.
     chains.sort_by_key(|c| std::cmp::Reverse(c.full.timestamp));
 
     chains
-}
-
-/// Traces an incremental backup's chain back to find which full backup it belongs to.
-fn find_chain_for_incremental(
-    chains: &[BackupChain],
-    _incr_path: &str,
-    incr_meta: &BackupMetadata,
-) -> Option<String> {
-    // Walk back through base_backup_path links.
-    // In the simplest case, the base points directly to a full backup.
-    // In deep chaining, it may point to another incremental,
-    // so we need to check all known backups.
-
-    let mut current_base = incr_meta.base_backup_path.as_deref()?;
-
-    // Check if the base is a full backup
-    for chain in chains {
-        if chain.full_path.trim_end_matches('/') == current_base.trim_end_matches('/') {
-            return Some(chain.full_path.clone());
-        }
-    }
-
-    // Check if the base is another incremental in a chain (deep chaining).
-    // We need to trace the chain of incrementals back to a full.
-    // For safety, limit the depth to avoid infinite loops.
-    for _ in 0..100 {
-        let mut found = false;
-
-        for chain in chains {
-            for (path, meta) in &chain.incrementals {
-                if path.trim_end_matches('/') == current_base.trim_end_matches('/') {
-                    if let Some(next_base) = &meta.base_backup_path {
-                        // Check if next_base is the full backup
-                        if chain.full_path.trim_end_matches('/') == next_base.trim_end_matches('/')
-                        {
-                            return Some(chain.full_path.clone());
-                        }
-                        current_base = next_base;
-                        found = true;
-                    } else {
-                        return Some(chain.full_path.clone());
-                    }
-                }
-            }
-        }
-
-        if !found {
-            break;
-        }
-    }
-
-    None
 }
 
 /// Determines if a full backup should be performed based on the configured interval.
@@ -300,6 +265,66 @@ mod tests {
             .collect();
         assert_eq!(paths, vec!["incremental/i1/", "incremental/i2/"]);
         assert_eq!(chains[0].latest().0, "incremental/i2/");
+    }
+
+    #[test]
+    fn group_chains_traces_chains_deeper_than_the_old_100_cap() {
+        // Deep chaining is the design goal: many incrementals between fulls.
+        // The previous implementation silently mis-traced beyond 100 links.
+        let fulls = vec![("full/f1/".into(), md(BackupKind::Full, t(0), None))];
+        let mut incrs = Vec::new();
+        let mut prev = "full/f1/".to_string();
+        for i in 1..=250 {
+            let path = format!("incremental/i{i:03}/");
+            incrs.push((path.clone(), md(BackupKind::Incremental, t(i), Some(&prev))));
+            prev = path;
+        }
+
+        let chains = group_chains(fulls, incrs);
+        assert_eq!(chains.len(), 1);
+        assert_eq!(chains[0].incrementals.len(), 250);
+        assert_eq!(chains[0].latest().0, "incremental/i250/");
+    }
+
+    #[test]
+    fn group_chains_normalizes_trailing_slashes_in_links() {
+        let fulls = vec![("full/f1/".into(), md(BackupKind::Full, t(0), None))];
+        // Base recorded without the trailing slash the path carries.
+        let incrs = vec![(
+            "incremental/i1/".into(),
+            md(BackupKind::Incremental, t(10), Some("full/f1")),
+        )];
+        let chains = group_chains(fulls, incrs);
+        assert_eq!(chains[0].incrementals.len(), 1);
+    }
+
+    #[test]
+    fn group_chains_drops_self_referential_incremental() {
+        let fulls = vec![("full/f1/".into(), md(BackupKind::Full, t(0), None))];
+        let incrs = vec![(
+            "incremental/loop/".into(),
+            md(BackupKind::Incremental, t(10), Some("incremental/loop/")),
+        )];
+        let chains = group_chains(fulls, incrs);
+        assert!(chains[0].incrementals.is_empty());
+    }
+
+    #[test]
+    fn group_chains_orphan_cascades_to_descendants() {
+        // i1's base is gone; i2 chains off i1 -> both are orphans.
+        let fulls = vec![("full/f1/".into(), md(BackupKind::Full, t(0), None))];
+        let incrs = vec![
+            (
+                "incremental/i1/".into(),
+                md(BackupKind::Incremental, t(10), Some("full/deleted/")),
+            ),
+            (
+                "incremental/i2/".into(),
+                md(BackupKind::Incremental, t(20), Some("incremental/i1/")),
+            ),
+        ];
+        let chains = group_chains(fulls, incrs);
+        assert!(chains[0].incrementals.is_empty());
     }
 
     #[test]
