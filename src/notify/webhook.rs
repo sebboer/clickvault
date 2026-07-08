@@ -24,12 +24,18 @@ impl WebhookNotifier {
         client: reqwest::Client,
         retry: RetryPolicy,
     ) -> Self {
-        let method = method.parse::<Method>().unwrap_or(Method::POST);
+        let method = method.parse::<Method>().unwrap_or_else(|_| {
+            tracing::warn!(method = %method, "Invalid webhook HTTP method; falling back to POST");
+            Method::POST
+        });
 
         let mut header_map = HeaderMap::new();
         for (key, value) in &headers {
-            if let (Ok(name), Ok(val)) = (key.parse::<HeaderName>(), HeaderValue::from_str(value)) {
-                header_map.insert(name, val);
+            match (key.parse::<HeaderName>(), HeaderValue::from_str(value)) {
+                (Ok(name), Ok(val)) => {
+                    header_map.insert(name, val);
+                }
+                _ => tracing::warn!(header = %key, "Ignoring invalid webhook header"),
             }
         }
 
@@ -52,5 +58,39 @@ impl Notifier for WebhookNotifier {
             .headers(self.headers.clone())
             .json(event);
         super::send_with_retry(&self.retry, request, "Webhook").await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::retry::RetryPolicy;
+
+    fn build(method: &str, headers: HashMap<String, String>) -> WebhookNotifier {
+        WebhookNotifier::new(
+            "https://example.com/hook".into(),
+            method.into(),
+            headers,
+            reqwest::Client::new(),
+            RetryPolicy::default(),
+        )
+    }
+
+    #[test]
+    fn parses_known_method_and_falls_back_to_post() {
+        assert_eq!(build("PUT", HashMap::new()).method, Method::PUT);
+        assert_eq!(build("not a method!", HashMap::new()).method, Method::POST);
+    }
+
+    #[test]
+    fn keeps_valid_headers_and_drops_invalid_ones() {
+        let mut headers = HashMap::new();
+        headers.insert("Authorization".to_string(), "Bearer t".to_string());
+        headers.insert("bad header name".to_string(), "x".to_string());
+        headers.insert("X-Ok".to_string(), "value\nwith newline".to_string());
+
+        let notifier = build("POST", headers);
+        assert_eq!(notifier.headers.len(), 1);
+        assert_eq!(notifier.headers["authorization"], "Bearer t");
     }
 }

@@ -67,6 +67,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Identifier quoting escapes backslashes: ClickHouse processes backslash
+  escapes inside backtick-quoted identifiers, so a database name ending in a
+  backslash previously swallowed the closing backtick and broke the BACKUP
+  statement.
+- Invalid webhook notification config (unparseable HTTP method, invalid
+  header names/values) now logs a warning instead of being silently dropped.
 - Cleanup no longer acts on an incomplete view: a metadata sidecar that exists
   but cannot be read or parsed aborts the run instead of silently shifting the
   retention window (missing sidecars are still skipped as orphans).

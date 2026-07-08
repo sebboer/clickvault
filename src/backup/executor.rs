@@ -23,9 +23,13 @@ struct BackupSubmit {
     status: i8,
 }
 
-/// Quotes a ClickHouse identifier with backticks, escaping any embedded backticks.
+/// Quotes a ClickHouse identifier with backticks. ClickHouse processes
+/// backslash escapes inside backticks (verified live: a trailing backslash
+/// swallows the closing backtick and breaks the statement), so backslashes
+/// must be escaped before backticks — mirroring `escape_sql_str` for string
+/// literals.
 fn quote_ident(ident: &str) -> String {
-    format!("`{}`", ident.replace('`', "``"))
+    format!("`{}`", ident.replace('\\', "\\\\").replace('`', "\\`"))
 }
 
 pub struct BackupResult {
@@ -288,6 +292,17 @@ mod tests {
             started_at: None,
             finished_at: None,
         }
+    }
+
+    #[test]
+    fn quote_ident_escapes_backticks_and_backslashes() {
+        assert_eq!(quote_ident("mydb"), "`mydb`");
+        assert_eq!(quote_ident("my`db"), r"`my\`db`");
+        assert_eq!(quote_ident(r"my\db"), r"`my\\db`");
+        // The dangerous case: a trailing backslash must not swallow the
+        // closing backtick.
+        assert_eq!(quote_ident(r"db\"), r"`db\\`");
+        assert_eq!(quote_ident(r"a\`b"), r"`a\\\`b`");
     }
 
     #[test]
