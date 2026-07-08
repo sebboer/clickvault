@@ -104,8 +104,12 @@ cargo fmt --all --check # formatting
 cargo clippy --all-targets -- -D warnings
 ```
 
-CI (`.github/workflows/ci.yml`) runs fmt, clippy, tests, and a release build on
-every push to `main` and every pull request.
+CI (`.github/workflows/ci.yml`) runs fmt, clippy, and tests, plus an MSRV
+check (`cargo check` with Rust 1.89 — keep `rust-version` in Cargo.toml, the
+README requirement, and the CI job in sync) and `cargo deny check`
+(RustSec advisories, license allowlist, registry sources; config in
+`deny.toml`) on every push to `main` and every pull request, and weekly on a
+schedule so new advisories surface without code changes.
 
 For end-to-end testing against a real stack, use `hack/docker-compose.yml`
 (ClickHouse + RustFS) and run the CLI against `hack/config.toml`.

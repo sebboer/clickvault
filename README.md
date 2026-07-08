@@ -17,7 +17,7 @@ ClickVault automates full and incremental backups with deep chaining, progress m
 
 ## Requirements
 
-- Rust 1.85+ (edition 2024)
+- Rust 1.89+ (edition 2024; enforced in CI and via `rust-version` in Cargo.toml)
 - ClickHouse server with `BACKUP`/`RESTORE` support (v22.8+)
 - S3-compatible storage (AWS S3, RustFS, etc.)
 

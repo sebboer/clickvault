@@ -43,6 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parsing.
 - CI workflow (`cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`)
   running on every push to `main` and every pull request.
+- CI gates for supply-chain hygiene: `cargo deny check` (RustSec advisories,
+  license allowlist, registry sources — config in `deny.toml`) and an MSRV
+  job, both also running weekly. The MSRV is 1.89 (driven by the clickhouse
+  crate; the README previously claimed 1.85, which no longer built) and is
+  declared via `rust-version` in Cargo.toml. `anyhow` was bumped past a
+  RUSTSEC unsoundness advisory; two quick-xml DoS advisories are documented
+  ignores pending an upstream rust-s3 bump.
 
 ### Changed
 
