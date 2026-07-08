@@ -214,7 +214,9 @@ Options:
 
 Without `--full`, the tool checks S3 for the latest full backup. If it's older than `full_backup_interval_days`, a full backup is created. Otherwise, an incremental backup is created chaining off the most recent backup.
 
-A run refuses to start while another backup is in `CREATING_BACKUP` state on the server; `--force` bypasses that guard, e.g. after a crashed run left a stuck entry in `system.backups`.
+A run refuses to start while another backup **into this config's bucket/prefix** is in `CREATING_BACKUP` state; backups of other databases or from other tools on a shared server don't block it. `--force` bypasses the guard, e.g. after a crashed run left a stuck entry in `system.backups`.
+
+The guard is check-then-act: two runs overlapping within the sub-second window between the check and the `BACKUP` submit can both proceed. The consequence is a forked chain — two incrementals sharing one base — which wastes some storage until the chain is cleaned up but corrupts nothing.
 
 ### `clickvault list`
 

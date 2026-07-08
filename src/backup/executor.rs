@@ -8,7 +8,7 @@ use tracing::{error, info};
 use super::discovery;
 use super::progress;
 use super::{BackupChain, BackupKind, BackupMetadata, METADATA_SCHEMA_VERSION};
-use crate::config::Config;
+use crate::config::{Config, S3Config};
 use crate::error::ClickVaultError;
 use crate::retry::{self, RetryPolicy};
 use crate::s3 as s3_helpers;
@@ -21,6 +21,27 @@ struct BackupSubmit {
     // row even though the initial status is always CREATING_BACKUP.
     #[allow(dead_code)]
     status: i8,
+}
+
+/// Escapes SQL LIKE metacharacters so bucket/prefix segments match literally.
+fn escape_like(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+/// SQL LIKE pattern matching backups written to this tool's bucket/prefix,
+/// as recorded in `system.backups.name` -- the S3(...) destination
+/// expression, e.g. `S3('http://host/bucket/prefix/full/...Z/', 'key',
+/// '[HIDDEN]')` (verified live on ClickHouse 26.4).
+fn in_progress_scope_pattern(s3: &S3Config) -> String {
+    let bucket = escape_like(&s3.bucket);
+    if s3.prefix.is_empty() {
+        // No prefix: the whole bucket is this tool's keyspace.
+        format!("%/{bucket}/%")
+    } else {
+        format!("%/{}/{}/%", bucket, escape_like(&s3.prefix))
+    }
 }
 
 /// Quotes a ClickHouse identifier with backticks. ClickHouse processes
@@ -74,7 +95,7 @@ pub async fn run_backup(
     let retry = config.retry.policy();
 
     if !skip_in_progress_check {
-        check_no_backup_in_progress(client, &retry)
+        check_no_backup_in_progress(client, &config.s3, &retry)
             .await
             .map_err(undecided)?;
     }
@@ -251,19 +272,31 @@ async fn rollback_orphaned_backup(bucket: &Bucket, backup_path: &str, retry: &Re
     }
 }
 
+/// Refuses to start while another backup into this tool's bucket/prefix is
+/// running, scoped via the destination recorded in `system.backups.name` so
+/// unrelated backups on a shared server don't block this run.
+///
+/// This is a check-then-act guard: two runs overlapping within the small
+/// window between this check and the BACKUP submit can both pass. The
+/// consequence is a forked chain (two incrementals sharing one base) --
+/// wasteful but not corrupting: discovery attaches both as siblings and the
+/// newer one continues the chain. `--force` skips the guard entirely (for
+/// stuck CREATING_BACKUP entries).
 async fn check_no_backup_in_progress(
     client: &Client,
+    s3: &S3Config,
     retry: &RetryPolicy,
 ) -> Result<(), ClickVaultError> {
     let sql = format!(
-        "SELECT {} FROM system.backups WHERE status = 'CREATING_BACKUP'",
+        "SELECT {} FROM system.backups WHERE status = 'CREATING_BACKUP' AND name LIKE ?",
         progress::BACKUP_STATUS_COLUMNS
     );
+    let pattern = in_progress_scope_pattern(s3);
     let in_progress: Vec<progress::BackupStatus> = retry::with_retry(
         retry,
         "in-progress check",
         progress::is_transient_clickhouse,
-        || client.query(&sql).fetch_all(),
+        || client.query(&sql).bind(&pattern).fetch_all(),
     )
     .await?;
 
@@ -292,6 +325,42 @@ mod tests {
             started_at: None,
             finished_at: None,
         }
+    }
+
+    #[test]
+    fn scope_pattern_targets_bucket_and_prefix() {
+        let mut s3 = crate::config::S3Config {
+            endpoint: "http://localhost:9002".into(),
+            clickhouse_endpoint: None,
+            bucket: "clickvault-backups".into(),
+            prefix: "dev".into(),
+            region: "us-east-1".into(),
+            access_key: None,
+            secret_key: None,
+            path_style: true,
+        };
+        assert_eq!(in_progress_scope_pattern(&s3), "%/clickvault-backups/dev/%");
+
+        s3.prefix = String::new();
+        assert_eq!(in_progress_scope_pattern(&s3), "%/clickvault-backups/%");
+    }
+
+    #[test]
+    fn scope_pattern_escapes_like_metacharacters() {
+        let s3 = crate::config::S3Config {
+            endpoint: "http://localhost:9002".into(),
+            clickhouse_endpoint: None,
+            bucket: "my_bucket".into(),
+            prefix: "team%prod".into(),
+            region: "us-east-1".into(),
+            access_key: None,
+            secret_key: None,
+            path_style: false,
+        };
+        assert_eq!(
+            in_progress_scope_pattern(&s3),
+            "%/my\\_bucket/team\\%prod/%"
+        );
     }
 
     #[test]

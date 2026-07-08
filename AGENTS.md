@@ -71,7 +71,7 @@ notify/* -> config.rs (provider config)
 
 ### Core Flow for `backup` Command
 
-1. Check no backup is already running (`system.backups WHERE status = 'CREATING_BACKUP'`)
+1. Check no backup is already running into this bucket/prefix (`system.backups WHERE status = 'CREATING_BACKUP' AND name LIKE '%/{bucket}/{prefix}/%'` — scoped so unrelated backups on a shared server don't block; check-then-act, see the guard's doc comment)
 2. Discover existing chains from S3 metadata
 3. Decide full vs incremental based on interval and `--full` flag
 4. Build `BACKUP DATABASE ... TO S3(...) ASYNC` SQL (with `SETTINGS base_backup` for incremental)

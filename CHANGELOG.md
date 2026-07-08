@@ -67,6 +67,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The in-progress backup guard is scoped to this tool's bucket/prefix (via
+  the destination recorded in `system.backups.name`), so backups of other
+  databases or from other tools on a shared ClickHouse server no longer
+  block a run with `BackupInProgress`.
 - Identifier quoting escapes backslashes: ClickHouse processes backslash
   escapes inside backtick-quoted identifiers, so a database name ending in a
   backslash previously swallowed the closing backtick and broke the BACKUP
