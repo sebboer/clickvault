@@ -25,11 +25,8 @@ ClickVault automates full and incremental backups with deep chaining, progress m
 
 ### From crates.io
 
-Pre-releases must be installed with an explicit version — check
-[crates.io/crates/clickvault](https://crates.io/crates/clickvault) for the latest:
-
 ```bash
-cargo install clickvault --version 0.1.0-alpha.4
+cargo install clickvault
 ```
 
 ### Docker

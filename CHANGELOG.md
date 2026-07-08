@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-08
+
 ### Added
 
 - Bounded retry with exponential backoff and jitter, tunable via an optional
@@ -127,5 +129,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [GitHub releases](https://github.com/sebboer/clickvault/releases) for the
   history of the `0.1.0-alpha.1` through `0.1.0-alpha.4` pre-releases.
 
-[Unreleased]: https://github.com/sebboer/clickvault/compare/v0.1.0-alpha.4...HEAD
+[Unreleased]: https://github.com/sebboer/clickvault/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/sebboer/clickvault/compare/v0.1.0-alpha.4...v0.1.0
 [0.1.0-alpha.4]: https://github.com/sebboer/clickvault/releases/tag/v0.1.0-alpha.4
