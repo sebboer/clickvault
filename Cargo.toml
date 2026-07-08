@@ -33,3 +33,7 @@ lto = true            # link-time optimization across all crates
 codegen-units = 1     # single codegen unit for better optimization
 panic = "abort"       # no unwinding overhead
 strip = true          # strip symbols from binary
+
+[dev-dependencies]
+tempfile = "3"
+testcontainers = "0.27"

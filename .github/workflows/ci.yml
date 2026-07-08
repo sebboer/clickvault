@@ -79,3 +79,25 @@ jobs:
 
       - name: cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2
+
+  integration:
+    name: Integration (ClickHouse + RustFS)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-integration-
+
+      - name: Run integration tests
+        run: cargo test --test integration -- --ignored --nocapture

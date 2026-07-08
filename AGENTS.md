@@ -111,11 +111,19 @@ README requirement, and the CI job in sync) and `cargo deny check`
 `deny.toml`) on every push to `main` and every pull request, and weekly on a
 schedule so new advisories surface without code changes.
 
-For end-to-end testing against a real stack, use `hack/docker-compose.yml`
-(ClickHouse + RustFS) and run the CLI against `hack/config.toml`.
+Integration tests (`tests/integration.rs`) drive the real binary against
+dockerized ClickHouse + RustFS via testcontainers (dynamic ports, automatic
+cleanup). They are `#[ignore]`d in the plain test run; with Docker available:
+
+```bash
+cargo test --test integration -- --ignored --nocapture
+```
+
+CI runs them in the `integration` job. For *interactive* end-to-end work,
+`hack/docker-compose.yml` (ClickHouse + RustFS) remains, with the CLI run
+against `hack/config.toml`.
 
 ## Areas Not Yet Implemented
 
 - Restore subcommand (out of scope for v1)
-- Integration tests against a live ClickHouse + S3 stack (only unit tests exist)
 - Backup of multiple databases or individual tables (currently single database only)

@@ -43,6 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parsing.
 - CI workflow (`cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`)
   running on every push to `main` and every pull request.
+- Dockerized integration tests (`tests/integration.rs`, testcontainers):
+  the full backup-chain lifecycle (full, incremental with verified chain
+  linkage, list, check, cleanup with bucket-delta assertions) and the check
+  command's missing/stale exit codes run against real ClickHouse + RustFS
+  containers, locally via `cargo test --test integration -- --ignored` and
+  in a dedicated CI job.
 - CI gates for supply-chain hygiene: `cargo deny check` (RustSec advisories,
   license allowlist, registry sources — config in `deny.toml`) and an MSRV
   job, both also running weekly. The MSRV is 1.89 (driven by the clickhouse
