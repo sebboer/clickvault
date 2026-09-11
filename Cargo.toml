@@ -36,4 +36,4 @@ strip = true          # strip symbols from binary
 
 [dev-dependencies]
 tempfile = "3"
-testcontainers = "0.27"
+testcontainers = "0.28"
